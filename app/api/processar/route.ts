@@ -1,39 +1,26 @@
 import { NextResponse } from 'next/server';
 
-const headersNav = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-};
+// ID do mecanismo de pesquisa (Google Programmable Search Engine). Não é segredo.
+const GOOGLE_CX = 'a4b6a7482ee7945a3';
 
-// Busca de imagens via DuckDuckGo (não é API oficial, mas não exige cadastro/chave).
-// O Mercado Livre passou a bloquear (403) qualquer busca anônima, então trocamos a fonte.
-async function buscarImagensDDG(termo: string, debug: any[]): Promise<string[]> {
+// Busca de imagens via Google Custom Search API (o Mercado Livre e o DuckDuckGo
+// pararam de funcionar sem cadastro/chave).
+async function buscarImagensGoogle(termo: string, apiKeyImg: string, debug: any[]): Promise<string[]> {
   let urls = ["", "", "", ""];
   try {
-    const resToken = await fetch(`https://duckduckgo.com/?q=${encodeURIComponent(termo)}`, { headers: headersNav });
-    const html = await resToken.text();
-    const match = html.match(/vqd=['"]([\d-]+)['"]/) || html.match(/vqd=([\d-]+)&/);
-
-    if (!match) {
-      debug.push({ termo, etapa: 'token', statusToken: resToken.status, erro: 'vqd não encontrado' });
-      return urls;
-    }
-    const vqd = match[1];
-
-    const resImgs = await fetch(
-      `https://duckduckgo.com/i.js?l=br-pt&o=json&q=${encodeURIComponent(termo)}&vqd=${vqd}&f=,,,,,&p=1`,
-      { headers: { ...headersNav, Referer: 'https://duckduckgo.com/' } }
-    );
-    const dados = await resImgs.json();
+    const url = `https://www.googleapis.com/customsearch/v1?key=${apiKeyImg}&cx=${GOOGLE_CX}&q=${encodeURIComponent(termo)}&searchType=image&num=4&gl=br&hl=pt-BR`;
+    const res = await fetch(url);
+    const dados = await res.json();
 
     debug.push({
       termo,
-      statusImgs: resImgs.status,
-      resultados: dados.results?.length ?? 0,
-      erro: dados.error || null,
+      status: res.status,
+      resultados: dados.items?.length ?? 0,
+      erro: dados.error?.message || null,
     });
 
-    if (dados.results && dados.results.length > 0) {
-      urls = dados.results.slice(0, 4).map((r: any) => r.image);
+    if (dados.items && dados.items.length > 0) {
+      urls = dados.items.slice(0, 4).map((item: any) => item.link);
       while (urls.length < 4) urls.push("");
     }
   } catch (e: any) {
@@ -45,7 +32,7 @@ async function buscarImagensDDG(termo: string, debug: any[]): Promise<string[]> 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { nome, apiKey } = body;
+    const { nome, apiKey, apiKeyImg } = body;
 
     // --- BUSCA DE IMAGENS ---
     let imagensEncontradas = ["", "", "", ""];
@@ -54,12 +41,14 @@ export async function POST(request: Request) {
     const tentativas = [busca, palavras.slice(0, 4).join(" "), palavras.slice(0, 2).join(" ")];
     const debugImg: any[] = [];
 
-    for (const tentativa of tentativas) {
-      if (!tentativa.trim()) continue;
-      const urls = await buscarImagensDDG(tentativa, debugImg);
-      if (urls.some(u => u)) {
-        imagensEncontradas = urls;
-        break;
+    if (apiKeyImg) {
+      for (const tentativa of tentativas) {
+        if (!tentativa.trim()) continue;
+        const urls = await buscarImagensGoogle(tentativa, apiKeyImg.trim(), debugImg);
+        if (urls.some(u => u)) {
+          imagensEncontradas = urls;
+          break;
+        }
       }
     }
 
