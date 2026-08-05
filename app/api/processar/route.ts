@@ -1,12 +1,67 @@
 import { NextResponse } from 'next/server';
 
+const headersNav = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+};
+
+// Busca de imagens via DuckDuckGo (não é API oficial, mas não exige cadastro/chave).
+// O Mercado Livre passou a bloquear (403) qualquer busca anônima, então trocamos a fonte.
+async function buscarImagensDDG(termo: string, debug: any[]): Promise<string[]> {
+  let urls = ["", "", "", ""];
+  try {
+    const resToken = await fetch(`https://duckduckgo.com/?q=${encodeURIComponent(termo)}`, { headers: headersNav });
+    const html = await resToken.text();
+    const match = html.match(/vqd=['"]([\d-]+)['"]/) || html.match(/vqd=([\d-]+)&/);
+
+    if (!match) {
+      debug.push({ termo, etapa: 'token', statusToken: resToken.status, erro: 'vqd não encontrado' });
+      return urls;
+    }
+    const vqd = match[1];
+
+    const resImgs = await fetch(
+      `https://duckduckgo.com/i.js?l=br-pt&o=json&q=${encodeURIComponent(termo)}&vqd=${vqd}&f=,,,,,&p=1`,
+      { headers: { ...headersNav, Referer: 'https://duckduckgo.com/' } }
+    );
+    const dados = await resImgs.json();
+
+    debug.push({
+      termo,
+      statusImgs: resImgs.status,
+      resultados: dados.results?.length ?? 0,
+      erro: dados.error || null,
+    });
+
+    if (dados.results && dados.results.length > 0) {
+      urls = dados.results.slice(0, 4).map((r: any) => r.image);
+      while (urls.length < 4) urls.push("");
+    }
+  } catch (e: any) {
+    debug.push({ termo, excecao: e.message });
+  }
+  return urls;
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const { nome, apiKey } = body;
 
-    // A busca de imagens no Mercado Livre roda no navegador (app/page.tsx),
-    // pois o ML bloqueia pedidos vindos de servidores como a Vercel.
+    // --- BUSCA DE IMAGENS ---
+    let imagensEncontradas = ["", "", "", ""];
+    const busca = nome.replace(/ENCORD /g, "ENCORDOAMENTO ").replace(/C\/ /g, "COM ").replace(/S\/ /g, "SEM ");
+    const palavras = busca.split(" ");
+    const tentativas = [busca, palavras.slice(0, 4).join(" "), palavras.slice(0, 2).join(" ")];
+    const debugImg: any[] = [];
+
+    for (const tentativa of tentativas) {
+      if (!tentativa.trim()) continue;
+      const urls = await buscarImagensDDG(tentativa, debugImg);
+      if (urls.some(u => u)) {
+        imagensEncontradas = urls;
+        break;
+      }
+    }
 
     // --- BUSCA NO GEMINI ---
     let descCurta = "";
@@ -48,7 +103,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       curta: descCurta,
-      longa: descLonga
+      longa: descLonga,
+      imagens: imagensEncontradas,
+      debugImg
     });
 
   } catch (error: any) {
