@@ -5,7 +5,12 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { nome, apiKey } = body;
 
-    // --- 1. BUSCA NO MERCADO LIVRE (Conexão Direta Oficial) ---
+    // Disfarce para o Mercado Livre não bloquear o IP da Vercel
+    const headersML = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    };
+
+    // --- 1. BUSCA NO MERCADO LIVRE ---
     let imagensEncontradas = ["", "", "", ""];
     let busca = nome.replace(/ENCORD /g, "ENCORDOAMENTO ").replace(/C\/ /g, "COM ").replace(/S\/ /g, "SEM ");
     let palavras = busca.split(" ");
@@ -15,28 +20,27 @@ export async function POST(request: Request) {
     for (let tentativa of tentativas) {
       if (!tentativa.trim()) continue;
       try {
-        // Chamando a API real diretamente (O backend do Next.js não tem bloqueio CORS)
         const urlBusca = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(tentativa)}&limit=1`;
-        const resML = await fetch(urlBusca);
+        const resML = await fetch(urlBusca, { headers: headersML });
         const dadosML = await resML.json();
 
         if (dadosML.results && dadosML.results.length > 0) {
           const idProduto = dadosML.results[0].id;
-          const resAnuncio = await fetch(`https://api.mercadolibre.com/items/${idProduto}`);
+          const resAnuncio = await fetch(`https://api.mercadolibre.com/items/${idProduto}`, { headers: headersML });
           const dadosAnuncio = await resAnuncio.json();
           
           if (dadosAnuncio.pictures) {
             imagensEncontradas = dadosAnuncio.pictures.slice(0, 4).map((f: any) => f.secure_url);
             while (imagensEncontradas.length < 4) imagensEncontradas.push("");
           }
-          break; // Achou a foto, para de tentar nomes menores
+          break; // Achou a foto, sai do loop
         }
       } catch (e) {
         console.log("Tentativa ML falhou:", tentativa);
       }
     }
 
-    // --- 2. BUSCA NO GEMINI (Com a tag -latest corrigida) ---
+    // --- 2. BUSCA NO GEMINI ---
     let descCurta = "";
     let descLonga = "";
     
@@ -44,8 +48,8 @@ export async function POST(request: Request) {
       const chaveLimpa = apiKey.trim();
       const prompt = `Atue como um especialista em e-commerce. Crie para o produto '${nome}':\n1. Uma descrição curta (máximo 2 linhas, atrativa).\n2. Uma descrição longa em formato HTML (com <b>, <p>, e <ul> para especificações).\n\nRetorne EXATAMENTE no formato:\nCURTA: [texto]\nLONGA: [texto HTML]`;
       
-      // Ajustado para gemini-1.5-flash-latest, que é a rota suportada na sua chave!
-      const urlGemini = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${chaveLimpa}`;
+      // Fixado no modelo padrão para evitar o erro Not Found
+      const urlGemini = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${chaveLimpa}`;
       
       const resGemini = await fetch(urlGemini, {
         method: 'POST',
@@ -75,7 +79,6 @@ export async function POST(request: Request) {
        descLonga = "";
     }
 
-    // Retorna para o Frontend
     return NextResponse.json({
       curta: descCurta,
       longa: descLonga,
