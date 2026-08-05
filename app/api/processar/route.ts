@@ -14,6 +14,7 @@ export async function POST(request: Request) {
     let palavras = busca.split(" ");
 
     let tentativas = [busca, palavras.slice(0, 4).join(" "), palavras.slice(0, 2).join(" ")];
+    const debugML: any[] = [];
 
     for (let tentativa of tentativas) {
       if (!tentativa.trim()) continue;
@@ -22,10 +23,24 @@ export async function POST(request: Request) {
         const resML = await fetch(urlBusca, { headers: headersML });
         const dadosML = await resML.json();
 
+        debugML.push({
+          tentativa,
+          status: resML.status,
+          resultados: dadosML.results?.length ?? 0,
+          erro: dadosML.error || dadosML.message || null,
+        });
+
         if (dadosML.results && dadosML.results.length > 0) {
           const idProduto = dadosML.results[0].id;
           const resAnuncio = await fetch(`https://api.mercadolibre.com/items/${idProduto}`, { headers: headersML });
           const dadosAnuncio = await resAnuncio.json();
+
+          debugML.push({
+            item: idProduto,
+            statusItem: resAnuncio.status,
+            temFotos: !!dadosAnuncio.pictures,
+            erroItem: dadosAnuncio.error || dadosAnuncio.message || null,
+          });
 
           if (dadosAnuncio.pictures) {
             imagensEncontradas = dadosAnuncio.pictures.slice(0, 4).map((f: any) => f.secure_url);
@@ -33,8 +48,9 @@ export async function POST(request: Request) {
           }
           break;
         }
-      } catch (e) {
+      } catch (e: any) {
         console.log("Tentativa ML falhou:", tentativa);
+        debugML.push({ tentativa, excecao: e.message });
       }
     }
 
@@ -78,7 +94,8 @@ export async function POST(request: Request) {
     return NextResponse.json({
       curta: descCurta,
       longa: descLonga,
-      imagens: imagensEncontradas
+      imagens: imagensEncontradas,
+      debugML
     });
 
   } catch (error: any) {
