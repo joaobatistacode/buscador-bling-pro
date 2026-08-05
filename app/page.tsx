@@ -4,6 +4,7 @@ import { useState } from 'react';
 export default function Home() {
   const [textoColado, setTextoColado] = useState('');
   const [apiKeyGemini, setApiKeyGemini] = useState('');
+  const [apiKeyImg, setApiKeyImg] = useState('');
   const [resultados, setResultados] = useState<any[]>([]);
   const [processando, setProcessando] = useState(false);
   const [log, setLog] = useState('');
@@ -33,7 +34,7 @@ export default function Home() {
         const res = await fetch('/api/processar', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nome, apiKey: apiKeyGemini })
+          body: JSON.stringify({ nome, apiKey: apiKeyGemini, apiKeyImg })
         });
 
         const dados = await res.json();
@@ -85,6 +86,13 @@ export default function Home() {
           placeholder="Chave da API do Gemini"
           value={apiKeyGemini}
           onChange={(e) => setApiKeyGemini(e.target.value)}
+          className="w-full p-3 border rounded text-black"
+        />
+        <input
+          type="password"
+          placeholder="Chave da API do Google (busca de imagens)"
+          value={apiKeyImg}
+          onChange={(e) => setApiKeyImg(e.target.value)}
           className="w-full p-3 border rounded text-black"
         />
         <textarea
