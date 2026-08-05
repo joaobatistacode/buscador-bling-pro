@@ -23,20 +23,19 @@ export default function Home() {
     let novosResultados = [];
 
     for (let i = 0; i < linhas.length; i++) {
-      let partes = linhas[i].split('\t'); 
+      let partes = linhas[i].split('\t');
       let codigo = partes.length > 1 ? partes[0] : `TEMP-${i}`;
       let nome = partes.length > 1 ? partes[1] : partes[0];
 
       setLog(`[${i + 1}/${linhas.length}] Processando: ${nome}`);
-      
+
       try {
-        // Agora o frontend apenas pede pro backend fazer o trabalho pesado!
         const res = await fetch('/api/processar', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ nome, apiKey: apiKeyGemini })
         });
-        
+
         const dados = await res.json();
 
         novosResultados.push({
@@ -44,28 +43,29 @@ export default function Home() {
           nome,
           curta: dados.curta || "",
           longa: dados.longa || "",
-          img1: dados.imagens[0], img2: dados.imagens[1], img3: dados.imagens[2], img4: dados.imagens[3]
+          img1: dados.imagens?.[0] || "", img2: dados.imagens?.[1] || "", img3: dados.imagens?.[2] || "", img4: dados.imagens?.[3] || ""
         });
-        
-        setResultados([...novosResultados]); 
+
+        setResultados([...novosResultados]);
         setProgresso({ atual: i + 1, total: linhas.length });
-        
+
       } catch (e: any) {
         setLog(`Erro no produto ${nome}: ${e.message}`);
       }
     }
-    
+
     setProcessando(false);
     setLog("Lote concluído com sucesso!");
   };
 
   const exportarCSV = () => {
-    const cabecalho = "Código,Produto,Descrição Curta,Descrição,Imagem 1,Imagem 2,Imagem 3,Imagem 4\n";
-    const linhasCSV = resultados.map(r => 
-      `"${r.codigo}","${r.nome}","${r.curta.replace(/"/g, '""')}","${r.longa.replace(/"/g, '""')}","${r.img1}","${r.img2}","${r.img3}","${r.img4}"`
+    const cabecalho = "Código;Produto;Descrição Curta;Descrição;Imagem 1;Imagem 2;Imagem 3;Imagem 4\n";
+
+    const linhasCSV = resultados.map(r =>
+      `"${r.codigo}";"${r.nome}";"${r.curta.replace(/"/g, '""')}";"${r.longa.replace(/"/g, '""')}";"${r.img1}";"${r.img2}";"${r.img3}";"${r.img4}"`
     ).join("\n");
-    
-    const blob = new Blob([cabecalho + linhasCSV], { type: 'text/csv;charset=utf-8;' });
+
+    const blob = new Blob(["\uFEFF" + cabecalho + linhasCSV], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -76,13 +76,13 @@ export default function Home() {
   };
 
   return (
-    <main className="p-8 max-w-5xl mx-auto font-sans">
+    <main className="p-8 max-w-6xl mx-auto font-sans">
       <h1 className="text-2xl font-bold mb-6 text-gray-800">Enriquecedor Bling PRO (Vercel)</h1>
-      
+
       <div className="mb-6 space-y-4">
-        <input 
-          type="password" 
-          placeholder="Chave da API do Gemini" 
+        <input
+          type="password"
+          placeholder="Chave da API do Gemini"
           value={apiKeyGemini}
           onChange={(e) => setApiKeyGemini(e.target.value)}
           className="w-full p-3 border rounded text-black"
@@ -97,16 +97,16 @@ export default function Home() {
       </div>
 
       <div className="flex gap-4 mb-6">
-        <button 
-          onClick={iniciarProcessamento} 
+        <button
+          onClick={iniciarProcessamento}
           disabled={processando || !textoColado.trim()}
           className="px-6 py-2 bg-blue-600 text-white rounded font-bold disabled:opacity-50"
         >
           {processando ? `Processando ${progresso.atual}/${progresso.total}...` : 'Iniciar'}
         </button>
-        
-        <button 
-          onClick={exportarCSV} 
+
+        <button
+          onClick={exportarCSV}
           disabled={resultados.length === 0}
           className="px-6 py-2 bg-green-600 text-white rounded font-bold disabled:opacity-50"
         >
@@ -124,17 +124,34 @@ export default function Home() {
             <tr className="bg-gray-100 border-b">
               <th className="p-2 text-black">Código</th>
               <th className="p-2 text-black">Nome</th>
-              <th className="p-2 text-black">Status Imagens</th>
+              <th className="p-2 text-black">Imagens</th>
+              <th className="p-2 text-black">Descrição Curta</th>
+              <th className="p-2 text-black">Descrição Longa</th>
             </tr>
           </thead>
           <tbody>
             {resultados.map((res, index) => (
-              <tr key={index} className="border-b">
+              <tr key={index} className="border-b align-top">
                 <td className="p-2 text-black">{res.codigo}</td>
                 <td className="p-2 text-black">{res.nome}</td>
                 <td className="p-2">
-                  {res.img1 ? <span className="text-green-600">✓ OK</span> : <span className="text-red-500">✕ Vazio</span>}
+                  <div className="flex gap-1 flex-wrap w-40">
+                    {[res.img1, res.img2, res.img3, res.img4].map((img, i) =>
+                      img ? (
+                        <a key={i} href={img} target="_blank" rel="noreferrer">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={img} alt={`${res.nome} ${i + 1}`} className="w-16 h-16 object-cover rounded border" />
+                        </a>
+                      ) : (
+                        <div key={i} className="w-16 h-16 flex items-center justify-center text-red-500 text-xs border rounded">
+                          Vazio
+                        </div>
+                      )
+                    )}
+                  </div>
                 </td>
+                <td className="p-2 text-black max-w-xs">{res.curta}</td>
+                <td className="p-2 text-black max-w-xs whitespace-pre-wrap">{res.longa}</td>
               </tr>
             ))}
           </tbody>
