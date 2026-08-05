@@ -1,6 +1,40 @@
 'use client';
 import { useState } from 'react';
 
+// Busca as imagens direto do navegador do usuário (o Mercado Livre bloqueia
+// pedidos vindos de servidores como a Vercel, mas não do navegador comum).
+async function buscarImagensML(nomeProduto: string): Promise<string[]> {
+  let imagensEncontradas = ["", "", "", ""];
+  const busca = nomeProduto.replace(/ENCORD /g, "ENCORDOAMENTO ").replace(/C\/ /g, "COM ").replace(/S\/ /g, "SEM ");
+  const palavras = busca.split(" ");
+  const tentativas = [busca, palavras.slice(0, 4).join(" "), palavras.slice(0, 2).join(" ")];
+
+  for (const tentativa of tentativas) {
+    if (!tentativa.trim()) continue;
+    try {
+      const urlBusca = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(tentativa)}&limit=1`;
+      const resML = await fetch(urlBusca);
+      const dadosML = await resML.json();
+
+      if (dadosML.results && dadosML.results.length > 0) {
+        const idProduto = dadosML.results[0].id;
+        const resAnuncio = await fetch(`https://api.mercadolibre.com/items/${idProduto}`);
+        const dadosAnuncio = await resAnuncio.json();
+
+        if (dadosAnuncio.pictures) {
+          imagensEncontradas = dadosAnuncio.pictures.slice(0, 4).map((f: any) => f.secure_url);
+          while (imagensEncontradas.length < 4) imagensEncontradas.push("");
+        }
+        break;
+      }
+    } catch (e) {
+      console.log("Tentativa ML falhou:", tentativa, e);
+    }
+  }
+
+  return imagensEncontradas;
+}
+
 export default function Home() {
   const [textoColado, setTextoColado] = useState('');
   const [apiKeyGemini, setApiKeyGemini] = useState('');
@@ -30,11 +64,14 @@ export default function Home() {
       setLog(`[${i + 1}/${linhas.length}] Processando: ${nome}`);
 
       try {
-        const res = await fetch('/api/processar', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nome, apiKey: apiKeyGemini })
-        });
+        const [imagens, res] = await Promise.all([
+          buscarImagensML(nome),
+          fetch('/api/processar', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nome, apiKey: apiKeyGemini })
+          })
+        ]);
 
         const dados = await res.json();
 
@@ -43,7 +80,7 @@ export default function Home() {
           nome,
           curta: dados.curta || "",
           longa: dados.longa || "",
-          img1: dados.imagens?.[0] || "", img2: dados.imagens?.[1] || "", img3: dados.imagens?.[2] || "", img4: dados.imagens?.[3] || ""
+          img1: imagens[0] || "", img2: imagens[1] || "", img3: imagens[2] || "", img4: imagens[3] || ""
         });
 
         setResultados([...novosResultados]);
