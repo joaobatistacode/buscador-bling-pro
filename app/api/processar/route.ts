@@ -1,31 +1,36 @@
 import { NextResponse } from 'next/server';
 
-// ID do mecanismo de pesquisa (Google Programmable Search Engine). Não é segredo.
-const GOOGLE_CX = 'a4b6a7482ee7945a3';
-
 // Modelo "lite": cota gratuita bem maior que o flash normal, o que importa em lotes grandes.
 const MODELO_GEMINI = 'gemini-flash-lite-latest';
 
 const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// Busca de imagens via Google Custom Search API (o Mercado Livre e o DuckDuckGo
-// pararam de funcionar sem cadastro/chave).
-async function buscarImagensGoogle(termo: string, apiKeyImg: string, debug: any[]): Promise<string[]> {
+// Busca de imagens via Serper (resultados do Google Imagens).
+// O Mercado Livre bloqueia acesso anônimo e a Custom Search JSON API do Google
+// foi fechada para novos projetos, então esta é a fonte que resta funcionando.
+async function buscarImagensSerper(termo: string, chaveSerper: string, debug: any[]): Promise<string[]> {
   let urls = ["", "", "", ""];
   try {
-    const url = `https://www.googleapis.com/customsearch/v1?key=${apiKeyImg}&cx=${GOOGLE_CX}&q=${encodeURIComponent(termo)}&searchType=image&num=4&gl=br&hl=pt-BR`;
-    const res = await fetch(url);
+    const res = await fetch('https://google.serper.dev/images', {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': chaveSerper,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ q: termo, gl: 'br', hl: 'pt-br', num: 10 })
+    });
+
     const dados = await res.json();
 
     debug.push({
       termo,
       status: res.status,
-      resultados: dados.items?.length ?? 0,
-      erro: dados.error?.message || null,
+      resultados: dados.images?.length ?? 0,
+      erro: dados.message || dados.error || null,
     });
 
-    if (dados.items && dados.items.length > 0) {
-      urls = dados.items.slice(0, 4).map((item: any) => item.link);
+    if (dados.images && dados.images.length > 0) {
+      urls = dados.images.slice(0, 4).map((img: any) => img.imageUrl);
       while (urls.length < 4) urls.push("");
     }
   } catch (e: any) {
@@ -86,20 +91,22 @@ export async function POST(request: Request) {
     let imagensEncontradas = ["", "", "", ""];
     const busca = nome.replace(/ENCORD /g, "ENCORDOAMENTO ").replace(/C\/ /g, "COM ").replace(/S\/ /g, "SEM ");
     const palavras = busca.split(" ");
+    // Termos do mais específico ao mais genérico; para na primeira que trouxer imagem,
+    // para não gastar créditos à toa.
     const tentativas = [busca, palavras.slice(0, 4).join(" "), palavras.slice(0, 2).join(" ")];
     const debugImg: any[] = [];
 
     if (apiKeyImg) {
       for (const tentativa of tentativas) {
         if (!tentativa.trim()) continue;
-        const urls = await buscarImagensGoogle(tentativa, apiKeyImg.trim(), debugImg);
+        const urls = await buscarImagensSerper(tentativa, apiKeyImg.trim(), debugImg);
         if (urls.some(u => u)) {
           imagensEncontradas = urls;
           break;
         }
       }
     } else {
-      debugImg.push({ erro: "Chave da API do Google não foi preenchida no site." });
+      debugImg.push({ erro: "Chave da API Serper não foi preenchida no site." });
     }
 
     // --- DESCRIÇÕES (GEMINI) ---
