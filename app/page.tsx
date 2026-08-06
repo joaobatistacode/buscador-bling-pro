@@ -86,28 +86,6 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 
   return { blob };
 }
-
-      // Encaixa dentro de 350x350 sem distorcer a proporção original.
-      const escala = Math.min(LADO_FOTO / img.width, LADO_FOTO / img.height);
-      const largura = img.width * escala;
-      const altura = img.height * escala;
-
-      ctx.drawImage(
-        img,
-        (LADO_MOLDURA - largura) / 2,
-        (LADO_MOLDURA - altura) / 2,
-        largura,
-        altura
-      );
-
-      canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.92);
-    };
-
-    img.onerror = () => resolve(null);
-    img.src = `/api/imagem?url=${encodeURIComponent(url)}`;
-  });
-}
-
 export default function Home() {
   const [textoColado, setTextoColado] = useState('');
   const [apiKeyGemini, setApiKeyGemini] = useState('');
