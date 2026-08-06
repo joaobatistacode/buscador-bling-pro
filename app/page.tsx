@@ -13,13 +13,16 @@ const LADO_FOTO = 350;
 const nomeSeguro = (texto: string) =>
   texto.replace(/[\\/:*?"<>|]/g, '-').trim() || 'sem-codigo';
 
-// Baixa a imagem pelo nosso proxy e devolve ela já na moldura branca.
-function montarImagem(url: string): Promise<Blob | null> {
+// Desenha a imagem já baixada dentro da moldura branca.
+function enquadrar(blobOriginal: Blob): Promise<Blob | null> {
   return new Promise((resolve) => {
+    // URL de blob é do próprio navegador, então o canvas não fica bloqueado.
+    const endereco = URL.createObjectURL(blobOriginal);
     const img = new Image();
-    img.crossOrigin = 'anonymous';
 
     img.onload = () => {
+      URL.revokeObjectURL(endereco);
+
       const canvas = document.createElement('canvas');
       canvas.width = LADO_MOLDURA;
       canvas.height = LADO_MOLDURA;
@@ -29,6 +32,60 @@ function montarImagem(url: string): Promise<Blob | null> {
 
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, LADO_MOLDURA, LADO_MOLDURA);
+
+      // Encaixa dentro de 350x350 sem distorcer a proporção original.
+      const escala = Math.min(LADO_FOTO / img.width, LADO_FOTO / img.height);
+      const largura = img.width * escala;
+      const altura = img.height * escala;
+
+      ctx.drawImage(
+        img,
+        (LADO_MOLDURA - largura) / 2,
+        (LADO_MOLDURA - altura) / 2,
+        largura,
+        altura
+      );
+
+      canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.92);
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(endereco);
+      resolve(null);
+    };
+
+    img.src = endereco;
+  });
+}
+
+// Baixa a imagem pelo nosso proxy e devolve ela na moldura branca.
+// Em caso de falha devolve o motivo, para o diagnóstico do ZIP.
+async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: string }> {
+  let resposta: Response;
+
+  try {
+    resposta = await fetch(`/api/imagem?url=${encodeURIComponent(url)}`);
+  } catch (e: any) {
+    return { blob: null, erro: `falha de rede: ${e.message}` };
+  }
+
+  if (!resposta.ok) {
+    const detalhe = await resposta.text().catch(() => '');
+    const dica = resposta.status === 404
+      ? ' (a rota /api/imagem não existe no site publicado)'
+      : '';
+    return { blob: null, erro: `HTTP ${resposta.status}${dica} ${detalhe.slice(0, 140)}`.trim() };
+  }
+
+  const original = await resposta.blob();
+  const blob = await enquadrar(original);
+
+  if (!blob) {
+    return { blob: null, erro: 'o navegador não conseguiu abrir a imagem' };
+  }
+
+  return { blob };
+}
 
       // Encaixa dentro de 350x350 sem distorcer a proporção original.
       const escala = Math.min(LADO_FOTO / img.width, LADO_FOTO / img.height);
