@@ -3,6 +3,11 @@ import { NextResponse } from 'next/server';
 // ID do mecanismo de pesquisa (Google Programmable Search Engine). Não é segredo.
 const GOOGLE_CX = 'a4b6a7482ee7945a3';
 
+// Modelo "lite": cota gratuita bem maior que o flash normal, o que importa em lotes grandes.
+const MODELO_GEMINI = 'gemini-flash-lite-latest';
+
+const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
+
 // Busca de imagens via Google Custom Search API (o Mercado Livre e o DuckDuckGo
 // pararam de funcionar sem cadastro/chave).
 async function buscarImagensGoogle(termo: string, apiKeyImg: string, debug: any[]): Promise<string[]> {
@@ -29,6 +34,49 @@ async function buscarImagensGoogle(termo: string, apiKeyImg: string, debug: any[
   return urls;
 }
 
+// O Gemini devolve 429 (cota) e 503 (sobrecarga) com frequência em lotes grandes,
+// então tentamos algumas vezes antes de desistir do produto.
+async function gerarDescricoes(nome: string, chave: string) {
+  const prompt = `Atue como um especialista em e-commerce. Crie para o produto '${nome}':\n1. Uma descrição curta (máximo 2 linhas, atrativa).\n2. Uma descrição longa em formato HTML (com <b>, <p>, e <ul> para especificações).\n\nRetorne EXATAMENTE no formato:\nCURTA: [texto]\nLONGA: [texto HTML]`;
+  const urlGemini = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${chave}`;
+
+  let ultimoErro = "";
+
+  for (let tentativa = 1; tentativa <= 4; tentativa++) {
+    const res = await fetch(urlGemini, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+    });
+
+    const dados = await res.json();
+
+    if (!dados.error) {
+      const resposta = dados.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!resposta) throw new Error("A IA respondeu vazio.");
+
+      if (resposta.includes("LONGA:")) {
+        const partes = resposta.split("LONGA:");
+        return {
+          curta: partes[0].replace("CURTA:", "").trim(),
+          longa: partes[1].trim()
+        };
+      }
+      return { curta: resposta.trim(), longa: resposta.trim() };
+    }
+
+    ultimoErro = dados.error.message;
+
+    // 429 = cota, 503 = sobrecarga. Só vale a pena reesperar nesses casos.
+    const vaiRetentar = (res.status === 429 || res.status === 503) && tentativa < 4;
+    if (!vaiRetentar) break;
+
+    await espera(tentativa * 2000);
+  }
+
+  throw new Error(ultimoErro || "Falha desconhecida na IA.");
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -50,44 +98,22 @@ export async function POST(request: Request) {
           break;
         }
       }
+    } else {
+      debugImg.push({ erro: "Chave da API do Google não foi preenchida no site." });
     }
 
-    // --- BUSCA NO GEMINI ---
+    // --- DESCRIÇÕES (GEMINI) ---
     let descCurta = "";
     let descLonga = "";
 
     try {
-      const chaveLimpa = apiKey.trim();
-      const prompt = `Atue como um especialista em e-commerce. Crie para o produto '${nome}':\n1. Uma descrição curta (máximo 2 linhas, atrativa).\n2. Uma descrição longa em formato HTML (com <b>, <p>, e <ul> para especificações).\n\nRetorne EXATAMENTE no formato:\nCURTA: [texto]\nLONGA: [texto HTML]`;
-
-      const urlGemini = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${chaveLimpa}`;
-
-      const resGemini = await fetch(urlGemini, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-      });
-
-      const dadosGemini = await resGemini.json();
-
-      if (dadosGemini.error) {
-        throw new Error(dadosGemini.error.message);
-      }
-
-      const resposta = dadosGemini.candidates[0].content.parts[0].text;
-
-      if (resposta.includes("LONGA:")) {
-        const partes = resposta.split("LONGA:");
-        descCurta = partes[0].replace("CURTA:", "").trim();
-        descLonga = partes[1].trim();
-      } else {
-        descCurta = resposta.trim();
-        descLonga = resposta.trim();
-      }
+      const textos = await gerarDescricoes(nome, apiKey.trim());
+      descCurta = textos.curta;
+      descLonga = textos.longa;
     } catch (e: any) {
-       console.log("Erro no Gemini:", e.message);
-       descCurta = `Erro IA: ${e.message}`;
-       descLonga = "";
+      console.log("Erro no Gemini:", e.message);
+      descCurta = `Erro IA: ${e.message}`;
+      descLonga = "";
     }
 
     return NextResponse.json({
