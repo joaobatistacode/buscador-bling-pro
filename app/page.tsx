@@ -115,11 +115,11 @@ export default function Home() {
 
           <div>
             <label className="block text-sm font-semibold text-gray-700 mb-1">
-              Chave da API do Google <span className="font-normal text-gray-500">(busca de imagens)</span>
+              Chave da API Serper <span className="font-normal text-gray-500">(busca de imagens)</span>
             </label>
             <input
               type="password"
-              placeholder="Cole aqui a chave do Google Custom Search"
+              placeholder="Cole aqui a chave do serper.dev"
               value={apiKeyImg}
               onChange={(e) => setApiKeyImg(e.target.value)}
               className="w-full p-3 border border-gray-300 rounded-lg text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
