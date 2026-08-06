@@ -1,7 +1,55 @@
 'use client';
 import { useState } from 'react';
+import { montarZip, type ArquivoZip } from './zip';
 
 const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// Medidas pedidas: a foto cabe em 350x350 e fica centralizada
+// numa moldura branca de 420x420.
+const LADO_MOLDURA = 420;
+const LADO_FOTO = 350;
+
+// Nome de pasta/arquivo seguro em Windows, macOS e Linux.
+const nomeSeguro = (texto: string) =>
+  texto.replace(/[\\/:*?"<>|]/g, '-').trim() || 'sem-codigo';
+
+// Baixa a imagem pelo nosso proxy e devolve ela já na moldura branca.
+function montarImagem(url: string): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = LADO_MOLDURA;
+      canvas.height = LADO_MOLDURA;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return resolve(null);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, LADO_MOLDURA, LADO_MOLDURA);
+
+      // Encaixa dentro de 350x350 sem distorcer a proporção original.
+      const escala = Math.min(LADO_FOTO / img.width, LADO_FOTO / img.height);
+      const largura = img.width * escala;
+      const altura = img.height * escala;
+
+      ctx.drawImage(
+        img,
+        (LADO_MOLDURA - largura) / 2,
+        (LADO_MOLDURA - altura) / 2,
+        largura,
+        altura
+      );
+
+      canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.92);
+    };
+
+    img.onerror = () => resolve(null);
+    img.src = `/api/imagem?url=${encodeURIComponent(url)}`;
+  });
+}
 
 export default function Home() {
   const [textoColado, setTextoColado] = useState('');
@@ -9,6 +57,7 @@ export default function Home() {
   const [apiKeyImg, setApiKeyImg] = useState('');
   const [resultados, setResultados] = useState<any[]>([]);
   const [processando, setProcessando] = useState(false);
+  const [baixando, setBaixando] = useState(false);
   const [log, setLog] = useState('');
   const [progresso, setProgresso] = useState({ atual: 0, total: 0 });
 
@@ -80,14 +129,73 @@ export default function Home() {
 
     // "\uFEFF" na frente avisa o Excel que é UTF-8, consertando os acentos
     const blob = new Blob(["\uFEFF" + cabecalho + linhasCSV], { type: 'text/csv;charset=utf-8;' });
+    baixarArquivo(blob, "produtos_enriquecidos_bling.csv");
+  };
+
+  const baixarArquivo = (blob: Blob, nomeArquivo: string) => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.setAttribute("download", "produtos_enriquecidos_bling.csv");
+    link.setAttribute("download", nomeArquivo);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
+
+  const baixarPacote = async () => {
+    setBaixando(true);
+    const arquivos: ArquivoZip[] = [];
+    const codificador = new TextEncoder();
+    let totalImagens = 0;
+    let falhas = 0;
+
+    for (let i = 0; i < resultados.length; i++) {
+      const res = resultados[i];
+      const codigo = nomeSeguro(res.codigo);
+      setLog(`Montando pacote [${i + 1}/${resultados.length}]: ${codigo}`);
+
+      const urls = [res.img1, res.img2, res.img3, res.img4].filter(Boolean);
+      let numero = 1;
+
+      for (const url of urls) {
+        const blob = await montarImagem(url);
+        if (blob) {
+          arquivos.push({
+            caminho: `${codigo}/${codigo}_${numero}.jpg`,
+            dados: new Uint8Array(await blob.arrayBuffer())
+          });
+          numero++;
+          totalImagens++;
+        } else {
+          falhas++;
+        }
+      }
+
+      const texto =
+        `CÓDIGO: ${res.codigo}\n` +
+        `PRODUTO: ${res.nome}\n\n` +
+        `=== DESCRIÇÃO CURTA ===\n${res.curta}\n\n` +
+        `=== DESCRIÇÃO LONGA ===\n${res.longa}\n`;
+
+      arquivos.push({
+        caminho: `${codigo}/${codigo}_descricao.txt`,
+        // "\uFEFF" no começo faz o Bloco de Notas abrir os acentos corretamente.
+        dados: codificador.encode("\uFEFF" + texto)
+      });
+    }
+
+    setLog("Compactando o arquivo...");
+    baixarArquivo(montarZip(arquivos), "produtos_bling.zip");
+
+    setBaixando(false);
+    setLog(
+      `Pacote pronto: ${resultados.length} pastas, ${totalImagens} imagens em 420x420. ` +
+      (falhas > 0 ? `${falhas} imagem(ns) não puderam ser baixadas.` : `Nenhuma falha.`)
+    );
+  };
+
+  const ocupado = processando || baixando;
 
   return (
     <main className="p-6 md:p-10 max-w-7xl mx-auto">
@@ -141,20 +249,33 @@ export default function Home() {
         <div className="flex flex-wrap gap-3 mt-4">
           <button
             onClick={iniciarProcessamento}
-            disabled={processando || !textoColado.trim()}
+            disabled={ocupado || !textoColado.trim()}
             className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:hover:bg-blue-600"
           >
             {processando ? `Processando ${progresso.atual}/${progresso.total}...` : 'Iniciar'}
           </button>
 
           <button
+            onClick={baixarPacote}
+            disabled={ocupado || resultados.length === 0}
+            className="px-6 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:hover:bg-purple-600"
+          >
+            {baixando ? 'Montando pacote...' : 'Baixar pastas (ZIP)'}
+          </button>
+
+          <button
             onClick={exportarCSV}
-            disabled={resultados.length === 0}
+            disabled={ocupado || resultados.length === 0}
             className="px-6 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:hover:bg-green-600"
           >
             Baixar CSV
           </button>
         </div>
+
+        <p className="text-xs text-gray-500 mt-3">
+          O ZIP traz uma pasta por código do produto, com as imagens em {LADO_MOLDURA}x{LADO_MOLDURA}px
+          (foto de até {LADO_FOTO}x{LADO_FOTO}px centralizada em fundo branco) e um .txt com as descrições.
+        </p>
       </section>
 
       <div className="bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-sm min-h-[56px] flex items-center mb-6">
