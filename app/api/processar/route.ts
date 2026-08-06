@@ -5,6 +5,31 @@ const MODELO_GEMINI = 'gemini-flash-lite-latest';
 
 const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// Rede de segurança: às vezes a IA devolve HTML mesmo sendo instruída a não usar.
+function limparHtml(texto: string): string {
+  return texto
+    .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+    // Itens de lista viram uma linha começando com "-".
+    .replace(/<\s*li[^>]*>/gi, '\n- ')
+    .replace(/<\s*\/\s*li\s*>/gi, '')
+    // Blocos ganham linha em branco antes e depois.
+    .replace(/<\s*\/?\s*(p|div|h[1-6]|ul|ol|section)[^>]*>/gi, '\n\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    // Sobras de markdown, caso apareçam.
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    // No máximo uma linha em branco entre blocos.
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 // Busca de imagens via Serper (resultados do Google Imagens).
 // O Mercado Livre bloqueia acesso anônimo e a Custom Search JSON API do Google
 // foi fechada para novos projetos, então esta é a fonte que resta funcionando.
@@ -42,7 +67,19 @@ async function buscarImagensSerper(termo: string, chaveSerper: string, debug: an
 // O Gemini devolve 429 (cota) e 503 (sobrecarga) com frequência em lotes grandes,
 // então tentamos algumas vezes antes de desistir do produto.
 async function gerarDescricoes(nome: string, chave: string) {
-  const prompt = `Atue como um especialista em e-commerce. Crie para o produto '${nome}':\n1. Uma descrição curta (máximo 2 linhas, atrativa).\n2. Uma descrição longa em formato HTML (com <b>, <p>, e <ul> para especificações).\n\nRetorne EXATAMENTE no formato:\nCURTA: [texto]\nLONGA: [texto HTML]`;
+  const prompt = `Atue como um especialista em e-commerce. Crie para o produto '${nome}':
+1. Uma descrição curta (máximo 2 linhas, atrativa).
+2. Uma descrição longa em TEXTO PURO, pronta para copiar e colar.
+
+Regras da descrição longa:
+- NÃO use HTML nem markdown. Nada de <p>, <b>, <ul>, **, ##.
+- Escreva 2 ou 3 parágrafos separados por uma linha em branco.
+- Termine com uma seção começando pela linha "ESPECIFICAÇÕES TÉCNICAS:" e,
+  abaixo, um item por linha no formato "- Rótulo: valor".
+
+Retorne EXATAMENTE no formato:
+CURTA: [texto]
+LONGA: [texto]`;
   const urlGemini = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${chave}`;
 
   let ultimoErro = "";
@@ -63,11 +100,12 @@ async function gerarDescricoes(nome: string, chave: string) {
       if (resposta.includes("LONGA:")) {
         const partes = resposta.split("LONGA:");
         return {
-          curta: partes[0].replace("CURTA:", "").trim(),
-          longa: partes[1].trim()
+          curta: limparHtml(partes[0].replace("CURTA:", "")),
+          longa: limparHtml(partes[1])
         };
       }
-      return { curta: resposta.trim(), longa: resposta.trim() };
+      const limpo = limparHtml(resposta);
+      return { curta: limpo, longa: limpo };
     }
 
     ultimoErro = dados.error.message;
