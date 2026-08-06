@@ -86,6 +86,7 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 
   return { blob };
 }
+
 export default function Home() {
   const [textoColado, setTextoColado] = useState('');
   const [apiKeyGemini, setApiKeyGemini] = useState('');
@@ -182,6 +183,7 @@ export default function Home() {
     setBaixando(true);
     const arquivos: ArquivoZip[] = [];
     const codificador = new TextEncoder();
+    const diagnostico: string[] = [];
     let totalImagens = 0;
     let falhas = 0;
 
@@ -194,7 +196,7 @@ export default function Home() {
       let numero = 1;
 
       for (const url of urls) {
-        const blob = await montarImagem(url);
+        const { blob, erro } = await montarImagem(url);
         if (blob) {
           arquivos.push({
             caminho: `${codigo}/${codigo}_${numero}.jpg`,
@@ -204,6 +206,7 @@ export default function Home() {
           totalImagens++;
         } else {
           falhas++;
+          diagnostico.push(`[${codigo}] ${erro}\n   url: ${url}`);
         }
       }
 
@@ -220,13 +223,24 @@ export default function Home() {
       });
     }
 
+    if (diagnostico.length > 0) {
+      arquivos.push({
+        caminho: `_imagens_que_falharam.txt`,
+        dados: codificador.encode(
+          "\uFEFFImagens que não puderam ser baixadas e o motivo:\n\n" + diagnostico.join("\n\n") + "\n"
+        )
+      });
+    }
+
     setLog("Compactando o arquivo...");
     baixarArquivo(montarZip(arquivos), "produtos_bling.zip");
 
     setBaixando(false);
     setLog(
       `Pacote pronto: ${resultados.length} pastas, ${totalImagens} imagens em 420x420. ` +
-      (falhas > 0 ? `${falhas} imagem(ns) não puderam ser baixadas.` : `Nenhuma falha.`)
+      (falhas > 0
+        ? `${falhas} falharam — veja _imagens_que_falharam.txt dentro do ZIP.`
+        : `Nenhuma falha.`)
     );
   };
 
