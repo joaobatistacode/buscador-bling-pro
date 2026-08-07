@@ -64,22 +64,60 @@ async function buscarImagensSerper(termo: string, chaveSerper: string, debug: an
   return urls;
 }
 
+export interface Ficha {
+  curta: string;
+  longa: string;
+  marca: string;
+  peso: string;
+  largura: string;
+  altura: string;
+  profundidade: string;
+}
+
+const FICHA_VAZIA = "NÃO INFORMADO";
+
+// Resposta em JSON com campos fixos: bem mais confiável do que recortar texto.
+const ESQUEMA = {
+  type: "OBJECT",
+  properties: {
+    curta: { type: "STRING" },
+    longa: { type: "STRING" },
+    marca: { type: "STRING" },
+    peso: { type: "STRING" },
+    largura: { type: "STRING" },
+    altura: { type: "STRING" },
+    profundidade: { type: "STRING" },
+  },
+  required: ["curta", "longa", "marca", "peso", "largura", "altura", "profundidade"],
+};
+
 // O Gemini devolve 429 (cota) e 503 (sobrecarga) com frequência em lotes grandes,
 // então tentamos algumas vezes antes de desistir do produto.
-async function gerarDescricoes(nome: string, chave: string) {
-  const prompt = `Atue como um especialista em e-commerce. Crie para o produto '${nome}':
-1. Uma descrição curta (máximo 2 linhas, atrativa).
-2. Uma descrição longa em TEXTO PURO, pronta para copiar e colar.
+async function gerarDescricoes(nome: string, chave: string): Promise<Ficha> {
+  const prompt = `Atue como um especialista em e-commerce brasileiro.
+Produto: '${nome}'
 
-Regras da descrição longa:
+Preencha os campos abaixo.
+
+curta: descrição curta e atrativa, no máximo 2 linhas.
+
+longa: descrição em TEXTO PURO, pronta para copiar e colar.
 - NÃO use HTML nem markdown. Nada de <p>, <b>, <ul>, **, ##.
-- Escreva 2 ou 3 parágrafos separados por uma linha em branco.
-- Termine com uma seção começando pela linha "ESPECIFICAÇÕES TÉCNICAS:" e,
+- 2 ou 3 parágrafos separados por uma linha em branco.
+- Termine com uma seção iniciada pela linha "ESPECIFICAÇÕES TÉCNICAS:" e,
   abaixo, um item por linha no formato "- Rótulo: valor".
 
-Retorne EXATAMENTE no formato:
-CURTA: [texto]
-LONGA: [texto]`;
+marca: o fabricante. Normalmente aparece no próprio nome do produto.
+
+peso, largura, altura, profundidade: medidas do produto embalado,
+com a unidade junto (exemplos: "250 g", "12 cm").
+
+REGRA CRÍTICA para marca, peso, largura, altura e profundidade:
+responda exatamente ${FICHA_VAZIA} quando não houver base concreta para
+o valor. NÃO invente número nem marca. É muito melhor deixar
+${FICHA_VAZIA} do que informar um dado errado, porque esses valores serão
+usados para calcular frete.`;
+
   const urlGemini = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${chave}`;
 
   let ultimoErro = "";
@@ -88,7 +126,13 @@ LONGA: [texto]`;
     const res = await fetch(urlGemini, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: ESQUEMA,
+        },
+      })
     });
 
     const dados = await res.json();
@@ -97,15 +141,27 @@ LONGA: [texto]`;
       const resposta = dados.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!resposta) throw new Error("A IA respondeu vazio.");
 
-      if (resposta.includes("LONGA:")) {
-        const partes = resposta.split("LONGA:");
-        return {
-          curta: limparHtml(partes[0].replace("CURTA:", "")),
-          longa: limparHtml(partes[1])
-        };
+      let bruto: any;
+      try {
+        bruto = JSON.parse(resposta);
+      } catch {
+        throw new Error("A IA respondeu num formato inesperado.");
       }
-      const limpo = limparHtml(resposta);
-      return { curta: limpo, longa: limpo };
+
+      const campo = (valor: any) => {
+        const texto = limparHtml(String(valor ?? "").trim());
+        return texto || FICHA_VAZIA;
+      };
+
+      return {
+        curta: limparHtml(String(bruto.curta ?? "")),
+        longa: limparHtml(String(bruto.longa ?? "")),
+        marca: campo(bruto.marca),
+        peso: campo(bruto.peso),
+        largura: campo(bruto.largura),
+        altura: campo(bruto.altura),
+        profundidade: campo(bruto.profundidade),
+      };
     }
 
     ultimoErro = dados.error.message;
@@ -147,23 +203,28 @@ export async function POST(request: Request) {
       debugImg.push({ erro: "Chave da API Serper não foi preenchida no site." });
     }
 
-    // --- DESCRIÇÕES (GEMINI) ---
-    let descCurta = "";
-    let descLonga = "";
+    // --- DESCRIÇÕES E FICHA (GEMINI) ---
+    let ficha: Ficha = {
+      curta: "", longa: "",
+      marca: FICHA_VAZIA, peso: FICHA_VAZIA,
+      largura: FICHA_VAZIA, altura: FICHA_VAZIA, profundidade: FICHA_VAZIA,
+    };
 
     try {
-      const textos = await gerarDescricoes(nome, apiKey.trim());
-      descCurta = textos.curta;
-      descLonga = textos.longa;
+      ficha = await gerarDescricoes(nome, apiKey.trim());
     } catch (e: any) {
       console.log("Erro no Gemini:", e.message);
-      descCurta = `Erro IA: ${e.message}`;
-      descLonga = "";
+      ficha = { ...ficha, curta: `Erro IA: ${e.message}` };
     }
 
     return NextResponse.json({
-      curta: descCurta,
-      longa: descLonga,
+      curta: ficha.curta,
+      longa: ficha.longa,
+      marca: ficha.marca,
+      peso: ficha.peso,
+      largura: ficha.largura,
+      altura: ficha.altura,
+      profundidade: ficha.profundidade,
       imagens: imagensEncontradas,
       debugImg
     });
