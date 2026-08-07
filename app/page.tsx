@@ -131,6 +131,11 @@ export default function Home() {
           nome,
           curta: dados.curta || "",
           longa: dados.longa || "",
+          marca: dados.marca || "",
+          peso: dados.peso || "",
+          largura: dados.largura || "",
+          altura: dados.altura || "",
+          profundidade: dados.profundidade || "",
           img1: dados.imagens?.[0] || "", img2: dados.imagens?.[1] || "", img3: dados.imagens?.[2] || "", img4: dados.imagens?.[3] || ""
         });
 
@@ -157,11 +162,16 @@ export default function Home() {
 
   const exportarCSV = () => {
     // Ponto e vírgula para o Excel separar as colunas corretamente
-    const cabecalho = "Código;Produto;Descrição Curta;Descrição;Imagem 1;Imagem 2;Imagem 3;Imagem 4\n";
+    const cabecalho =
+      "Código;Produto;Marca;Peso;Largura;Altura;Profundidade;" +
+      "Descrição Curta;Descrição;Imagem 1;Imagem 2;Imagem 3;Imagem 4\n";
 
-    const linhasCSV = resultados.map(r =>
-      `"${r.codigo}";"${r.nome}";"${r.curta.replace(/"/g, '""')}";"${r.longa.replace(/"/g, '""')}";"${r.img1}";"${r.img2}";"${r.img3}";"${r.img4}"`
-    ).join("\n");
+    const aspas = (valor: string) => `"${(valor || "").replace(/"/g, '""')}"`;
+
+    const linhasCSV = resultados.map(r => [
+      r.codigo, r.nome, r.marca, r.peso, r.largura, r.altura, r.profundidade,
+      r.curta, r.longa, r.img1, r.img2, r.img3, r.img4
+    ].map(aspas).join(";")).join("\n");
 
     // "\uFEFF" na frente avisa o Excel que é UTF-8, consertando os acentos
     const blob = new Blob(["\uFEFF" + cabecalho + linhasCSV], { type: 'text/csv;charset=utf-8;' });
@@ -212,7 +222,13 @@ export default function Home() {
 
       const texto =
         `CÓDIGO: ${res.codigo}\n` +
-        `PRODUTO: ${res.nome}\n\n` +
+        `PRODUTO: ${res.nome}\n` +
+        `MARCA: ${res.marca}\n\n` +
+        `=== MEDIDAS (estimadas pela IA — confira antes de cadastrar) ===\n` +
+        `PESO: ${res.peso}\n` +
+        `LARGURA: ${res.largura}\n` +
+        `ALTURA: ${res.altura}\n` +
+        `PROFUNDIDADE: ${res.profundidade}\n\n` +
         `=== DESCRIÇÃO CURTA ===\n${res.curta}\n\n` +
         `=== DESCRIÇÃO LONGA ===\n${res.longa}\n`;
 
@@ -340,6 +356,7 @@ export default function Home() {
                   <th className="p-3 font-semibold text-gray-700">Código</th>
                   <th className="p-3 font-semibold text-gray-700">Nome</th>
                   <th className="p-3 font-semibold text-gray-700">Imagens</th>
+                  <th className="p-3 font-semibold text-gray-700">Ficha</th>
                   <th className="p-3 font-semibold text-gray-700">Descrição Curta</th>
                   <th className="p-3 font-semibold text-gray-700">Descrição Longa</th>
                 </tr>
@@ -373,6 +390,13 @@ export default function Home() {
                             )
                           )}
                         </div>
+                      </td>
+                      <td className="p-3 text-xs text-gray-700 whitespace-nowrap">
+                        <div><span className="text-gray-500">Marca:</span> {res.marca}</div>
+                        <div><span className="text-gray-500">Peso:</span> {res.peso}</div>
+                        <div><span className="text-gray-500">L:</span> {res.largura}</div>
+                        <div><span className="text-gray-500">A:</span> {res.altura}</div>
+                        <div><span className="text-gray-500">P:</span> {res.profundidade}</div>
                       </td>
                       <td className={`p-3 max-w-xs ${falhou ? 'text-red-600' : 'text-gray-900'}`}>
                         {res.curta}
