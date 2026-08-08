@@ -114,7 +114,7 @@ export default function Home() {
   const [bling, setBling] = useState({ conectado: false, configurado: false });
   const [enviandoBling, setEnviandoBling] = useState(false);
   const [sobrescrever, setSobrescrever] = useState(false);
-  const [unidadeMedida, setUnidadeMedida] = useState(2);
+  const [unidadeMedida, setUnidadeMedida] = useState(1);
   const [envios, setEnvios] = useState<ResultadoEnvio[]>([]);
 
   // Pedido de parada: o botão marca aqui e o laço encerra no próximo produto.
@@ -678,9 +678,9 @@ export default function Home() {
                   disabled={ocupado}
                   className="p-2 border border-gray-300 rounded-lg text-gray-900 bg-white text-sm"
                 >
-                  <option value={1}>1 — metros</option>
-                  <option value={2}>2 — centímetros</option>
-                  <option value={3}>3 — milímetros</option>
+                  <option value={0}>0 — metros</option>
+                  <option value={1}>1 — centímetros</option>
+                  <option value={2}>2 — milímetros</option>
                 </select>
               </div>
             </div>
