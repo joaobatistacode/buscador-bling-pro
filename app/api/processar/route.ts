@@ -91,8 +91,33 @@ const ESQUEMA = {
   required: ["curta", "longa", "marca", "peso", "largura", "altura", "profundidade"],
 };
 
-// O Gemini devolve 429 (cota) e 503 (sobrecarga) com frequência em lotes grandes,
-// então tentamos algumas vezes antes de desistir do produto.
+// Quando estoura a cota, o Google informa quantos segundos esperar.
+function segundosParaTentarDeNovo(erro: any): number | null {
+  const detalhes = erro?.details;
+  if (!Array.isArray(detalhes)) return null;
+
+  for (const item of detalhes) {
+    const valor = item?.retryDelay;
+    if (typeof valor === 'string') {
+      const casa = valor.match(/^([\d.]+)s$/);
+      if (casa) return Math.ceil(parseFloat(casa[1]));
+    }
+  }
+  return null;
+}
+
+// Erro de cota é tratado no navegador, não aqui: a espera pode passar de um
+// minuto e a função da Vercel morreria por timeout antes disso.
+class ErroDeCota extends Error {
+  esperar: number;
+  constructor(mensagem: string, esperar: number) {
+    super(mensagem);
+    this.esperar = esperar;
+  }
+}
+
+// Sobrecarga (503) é passageira e some em segundos, então essa dá para
+// reesperar aqui mesmo, dentro do tempo que a Vercel permite.
 async function gerarDescricoes(nome: string, chave: string): Promise<Ficha> {
   const prompt = `Atue como um especialista em e-commerce brasileiro.
 Produto: '${nome}'
@@ -122,7 +147,7 @@ usados para calcular frete.`;
 
   let ultimoErro = "";
 
-  for (let tentativa = 1; tentativa <= 4; tentativa++) {
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
     const res = await fetch(urlGemini, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -166,11 +191,16 @@ usados para calcular frete.`;
 
     ultimoErro = dados.error.message;
 
-    // 429 = cota, 503 = sobrecarga. Só vale a pena reesperar nesses casos.
-    const vaiRetentar = (res.status === 429 || res.status === 503) && tentativa < 4;
-    if (!vaiRetentar) break;
+    // Cota estourada: devolve na hora com o tempo de espera, para o navegador
+    // aguardar. Insistir aqui só faria a função da Vercel estourar o timeout.
+    if (res.status === 429) {
+      throw new ErroDeCota(ultimoErro, segundosParaTentarDeNovo(dados.error) ?? 60);
+    }
 
-    await espera(tentativa * 2000);
+    // Sobrecarga do modelo: passageira, dá para reesperar aqui mesmo.
+    if (res.status !== 503 || tentativa === 3) break;
+
+    await espera(tentativa * 1500);
   }
 
   throw new Error(ultimoErro || "Falha desconhecida na IA.");
@@ -210,11 +240,20 @@ export async function POST(request: Request) {
       largura: FICHA_VAZIA, altura: FICHA_VAZIA, profundidade: FICHA_VAZIA,
     };
 
+    // Sinaliza para o navegador esperar e tentar este mesmo produto de novo.
+    let cotaExcedida = false;
+    let esperarSegundos = 0;
+
     try {
       ficha = await gerarDescricoes(nome, apiKey.trim());
     } catch (e: any) {
       console.log("Erro no Gemini:", e.message);
       ficha = { ...ficha, curta: `Erro IA: ${e.message}` };
+
+      if (e instanceof ErroDeCota) {
+        cotaExcedida = true;
+        esperarSegundos = e.esperar;
+      }
     }
 
     return NextResponse.json({
@@ -226,6 +265,8 @@ export async function POST(request: Request) {
       altura: ficha.altura,
       profundidade: ficha.profundidade,
       imagens: imagensEncontradas,
+      cotaExcedida,
+      esperarSegundos,
       debugImg
     });
 
