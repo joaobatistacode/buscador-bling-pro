@@ -1,6 +1,7 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { montarZip, type ArquivoZip } from './zip';
+import { enviarProduto, type ResultadoEnvio } from './enviar-bling';
 
 const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -9,9 +10,19 @@ const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
 const LADO_MOLDURA = 420;
 const LADO_FOTO = 350;
 
+// Onde o histórico fica guardado no navegador. Sobrevive a queda de
+// energia e a fechar o navegador: só some se o usuário limpar.
+const CHAVE_HISTORICO = 'buscador-bling:resultados';
+
+// Cada lote vira um ZIP separado. Um ZIP único com centenas de produtos
+// fica grande demais para o navegador montar de uma vez só.
+const PADRAO_POR_ZIP = 100;
+
 // Nome de pasta/arquivo seguro em Windows, macOS e Linux.
 const nomeSeguro = (texto: string) =>
   texto.replace(/[\\/:*?"<>|]/g, '-').trim() || 'sem-codigo';
+
+const deuErro = (res: any) => String(res?.curta || '').startsWith('Erro IA:');
 
 // Desenha a imagem já baixada dentro da moldura branca.
 function enquadrar(blobOriginal: Blob): Promise<Blob | null> {
@@ -95,7 +106,121 @@ export default function Home() {
   const [processando, setProcessando] = useState(false);
   const [baixando, setBaixando] = useState(false);
   const [log, setLog] = useState('');
+  const [aviso, setAviso] = useState('');
   const [progresso, setProgresso] = useState({ atual: 0, total: 0 });
+  const [porZip, setPorZip] = useState(PADRAO_POR_ZIP);
+
+  // Integração com o Bling
+  const [bling, setBling] = useState({ conectado: false, configurado: false });
+  const [enviandoBling, setEnviandoBling] = useState(false);
+  const [sobrescrever, setSobrescrever] = useState(false);
+  const [unidadeMedida, setUnidadeMedida] = useState(2);
+  const [envios, setEnvios] = useState<ResultadoEnvio[]>([]);
+
+  // Pedido de parada: o botão marca aqui e o laço encerra no próximo produto.
+  const pararRef = useRef(false);
+
+  // Recupera o que já tinha sido processado numa sessão anterior.
+  useEffect(() => {
+    try {
+      const salvo = localStorage.getItem(CHAVE_HISTORICO);
+      if (!salvo) return;
+
+      const dados = JSON.parse(salvo);
+      if (Array.isArray(dados) && dados.length > 0) {
+        setResultados(dados);
+        setAviso(
+          `${dados.length} produto(s) recuperados da sessão anterior. ` +
+          `Você pode baixar o ZIP direto, sem reprocessar.`
+        );
+      }
+    } catch {
+      // Histórico corrompido não deve travar a página.
+    }
+  }, []);
+
+  // Descobre se já existe conexão com o Bling e lê o retorno da autorização.
+  useEffect(() => {
+    fetch('/api/bling/estado')
+      .then(r => r.json())
+      .then(setBling)
+      .catch(() => {});
+
+    const situacao = new URLSearchParams(window.location.search).get('bling');
+    if (situacao === 'conectado') {
+      setAviso('Conectado ao Bling.');
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (situacao) {
+      setAviso(`Não deu para conectar ao Bling — ${situacao}`);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  const desconectarBling = async () => {
+    await fetch('/api/bling/estado', { method: 'DELETE' });
+    setBling(b => ({ ...b, conectado: false }));
+    setAviso('Desconectado do Bling.');
+  };
+
+  // Percorre os produtos mandando (ou simulando) para o Bling.
+  const mandarParaBling = async (produtos: any[], simular: boolean) => {
+    if (produtos.length === 0) return;
+
+    setEnviandoBling(true);
+    pararRef.current = false;
+    setEnvios([]);
+    setAviso('');
+
+    const saidas: ResultadoEnvio[] = [];
+
+    for (let i = 0; i < produtos.length; i++) {
+      if (pararRef.current) {
+        setLog(`Interrompido em ${i} de ${produtos.length}.`);
+        break;
+      }
+
+      const saida = await enviarProduto(produtos[i], {
+        simular,
+        sobrescrever,
+        unidadeMedida,
+        enquadrar: montarImagem,
+        aoAndar: (mensagem) => setLog(`[${i + 1}/${produtos.length}] ${mensagem}`),
+      });
+
+      saidas.push(saida);
+      setEnvios([...saidas]);
+    }
+
+    setEnviandoBling(false);
+
+    const okey = saidas.filter(s => s.enviado).length;
+    const falhos = saidas.filter(s => s.erro).length;
+    setLog(
+      simular
+        ? `Simulação concluída em ${saidas.length} produto(s). Confira abaixo o que seria alterado.`
+        : `Envio concluído: ${okey} atualizados no Bling, ${falhos} com erro.`
+    );
+  };
+
+  // Grava a cada produto: se faltar energia, no máximo um produto se perde.
+  const salvarHistorico = (dados: any[]) => {
+    try {
+      localStorage.setItem(CHAVE_HISTORICO, JSON.stringify(dados));
+    } catch {
+      setAviso(
+        'Atenção: o histórico não coube no armazenamento do navegador. ' +
+        'Baixe o ZIP do que já foi feito e limpe o histórico antes de continuar.'
+      );
+    }
+  };
+
+  const limparHistorico = () => {
+    if (!confirm('Isso apaga todos os produtos já processados. Confirma?')) return;
+    localStorage.removeItem(CHAVE_HISTORICO);
+    setResultados([]);
+    setAviso('');
+    setLog('Histórico apagado.');
+  };
 
   const iniciarProcessamento = async () => {
     if (!apiKeyGemini) {
@@ -107,26 +232,86 @@ export default function Home() {
     if (linhas.length === 0 || linhas[0] === "") return;
 
     setProcessando(true);
+    setAviso('');
+    pararRef.current = false;
     setProgresso({ atual: 0, total: linhas.length });
-    const novosResultados = [];
+
+    // Mantém o que já existe e vai atualizando por código.
+    const porCodigo = new Map<string, any>(resultados.map(r => [r.codigo, r]));
+    let pulados = 0;
+    let cotaAcabou = false;
 
     for (let i = 0; i < linhas.length; i++) {
+      if (pararRef.current) {
+        setLog(`Interrompido em ${i} de ${linhas.length}. O que já foi feito está salvo.`);
+        break;
+      }
+
       const partes = linhas[i].split('\t');
       const codigo = partes.length > 1 ? partes[0] : `TEMP-${i}`;
       const nome = partes.length > 1 ? partes[1] : partes[0];
 
-      setLog(`[${i + 1}/${linhas.length}] Processando: ${nome}`);
+      // Já processado com sucesso antes: não gasta crédito de novo.
+      const anterior = porCodigo.get(codigo);
+      if (anterior && !deuErro(anterior)) {
+        pulados++;
+        setProgresso({ atual: i + 1, total: linhas.length });
+        continue;
+      }
 
-      try {
-        const res = await fetch('/api/processar', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nome, apiKey: apiKeyGemini, apiKeyImg })
-        });
+      // Se a cota estourar, espera o tempo que o Google pediu e tenta o
+      // mesmo produto de novo. Três recusas seguidas significam que a cota
+      // do dia acabou, e aí não adianta insistir.
+      let dados: any = null;
 
-        const dados = await res.json();
+      for (let volta = 1; volta <= 3; volta++) {
+        if (pararRef.current) break;
 
-        novosResultados.push({
+        setLog(`[${i + 1}/${linhas.length}] Processando: ${nome}`);
+
+        try {
+          const res = await fetch('/api/processar', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nome, apiKey: apiKeyGemini, apiKeyImg })
+          });
+          dados = await res.json();
+        } catch (e: any) {
+          setLog(`Erro de rede em ${nome}: ${e.message}`);
+          break;
+        }
+
+        if (!dados?.cotaExcedida) break;
+
+        if (volta === 3) {
+          cotaAcabou = true;
+          break;
+        }
+
+        const segundos = Math.max(5, Number(dados.esperarSegundos) || 60);
+        for (let resta = segundos; resta > 0; resta--) {
+          if (pararRef.current) break;
+          setLog(
+            `Cota da IA atingida. Aguardando ${resta}s para tentar de novo ` +
+            `(${nome}). Tentativa ${volta} de 3.`
+          );
+          await espera(1000);
+        }
+      }
+
+      if (cotaAcabou) {
+        setAviso(
+          'A cota diária gratuita do Gemini acabou (500 requisições por dia). ' +
+          'Tudo que já foi processado está salvo: você pode baixar o ZIP agora e, ' +
+          'amanhã, colar a mesma lista e clicar em Iniciar — os prontos serão pulados ' +
+          'e só os que faltam vão ser processados.'
+        );
+        setLog(`Parado em ${i} de ${linhas.length} por falta de cota. Nada foi perdido.`);
+        break;
+      }
+
+      if (dados) {
+        porCodigo.set(codigo, {
           codigo,
           nome,
           curta: dados.curta || "",
@@ -139,12 +324,11 @@ export default function Home() {
           img1: dados.imagens?.[0] || "", img2: dados.imagens?.[1] || "", img3: dados.imagens?.[2] || "", img4: dados.imagens?.[3] || ""
         });
 
-        setResultados([...novosResultados]);
-        setProgresso({ atual: i + 1, total: linhas.length });
-
-      } catch (e: any) {
-        setLog(`Erro no produto ${nome}: ${e.message}`);
+        const lista = [...porCodigo.values()];
+        setResultados(lista);
+        salvarHistorico(lista);
       }
+      setProgresso({ atual: i + 1, total: linhas.length });
 
       // Respiro entre produtos para não estourar o limite por minuto da IA.
       if (i < linhas.length - 1) await espera(1500);
@@ -152,12 +336,17 @@ export default function Home() {
 
     setProcessando(false);
 
-    const comErro = novosResultados.filter(r => r.curta.startsWith("Erro IA:")).length;
-    const semImagem = novosResultados.filter(r => !r.img1).length;
-    setLog(
-      `Lote concluído: ${novosResultados.length} produtos. ` +
-      `${comErro} com falha na descrição, ${semImagem} sem imagem.`
-    );
+    const lista = [...porCodigo.values()];
+    const comErro = lista.filter(deuErro).length;
+    const semImagem = lista.filter(r => !r.img1).length;
+
+    if (!cotaAcabou) {
+      setLog(
+        `Lote concluído: ${lista.length} produtos no total` +
+        (pulados > 0 ? ` (${pulados} já estavam prontos e foram pulados)` : '') +
+        `. ${comErro} com falha na descrição, ${semImagem} sem imagem.`
+      );
+    }
   };
 
   const exportarCSV = () => {
@@ -191,76 +380,100 @@ export default function Home() {
 
   const baixarPacote = async () => {
     setBaixando(true);
-    const arquivos: ArquivoZip[] = [];
+    pararRef.current = false;
+
+    const tamanhoLote = Math.max(1, Number(porZip) || PADRAO_POR_ZIP);
+    const totalPartes = Math.ceil(resultados.length / tamanhoLote);
     const codificador = new TextEncoder();
-    const diagnostico: string[] = [];
     let totalImagens = 0;
     let falhas = 0;
 
-    for (let i = 0; i < resultados.length; i++) {
-      const res = resultados[i];
-      const codigo = nomeSeguro(res.codigo);
-      setLog(`Montando pacote [${i + 1}/${resultados.length}]: ${codigo}`);
-
-      const urls = [res.img1, res.img2, res.img3, res.img4].filter(Boolean);
-      let numero = 1;
-
-      for (const url of urls) {
-        const { blob, erro } = await montarImagem(url);
-        if (blob) {
-          arquivos.push({
-            caminho: `${codigo}/${codigo}_${numero}.jpg`,
-            dados: new Uint8Array(await blob.arrayBuffer())
-          });
-          numero++;
-          totalImagens++;
-        } else {
-          falhas++;
-          diagnostico.push(`[${codigo}] ${erro}\n   url: ${url}`);
-        }
+    for (let parte = 0; parte < totalPartes; parte++) {
+      if (pararRef.current) {
+        setLog(`Download interrompido na parte ${parte + 1} de ${totalPartes}.`);
+        break;
       }
 
-      const texto =
-        `CÓDIGO: ${res.codigo}\n` +
-        `PRODUTO: ${res.nome}\n` +
-        `MARCA: ${res.marca}\n\n` +
-        `=== MEDIDAS (estimadas pela IA — confira antes de cadastrar) ===\n` +
-        `PESO: ${res.peso}\n` +
-        `LARGURA: ${res.largura}\n` +
-        `ALTURA: ${res.altura}\n` +
-        `PROFUNDIDADE: ${res.profundidade}\n\n` +
-        `=== DESCRIÇÃO CURTA ===\n${res.curta}\n\n` +
-        `=== DESCRIÇÃO LONGA ===\n${res.longa}\n`;
+      const fatia = resultados.slice(parte * tamanhoLote, (parte + 1) * tamanhoLote);
+      const arquivos: ArquivoZip[] = [];
+      const diagnostico: string[] = [];
 
-      arquivos.push({
-        caminho: `${codigo}/${codigo}_descricao.txt`,
-        // "\uFEFF" no começo faz o Bloco de Notas abrir os acentos corretamente.
-        dados: codificador.encode("\uFEFF" + texto)
-      });
+      for (let i = 0; i < fatia.length; i++) {
+        if (pararRef.current) break;
+
+        const res = fatia[i];
+        const codigo = nomeSeguro(res.codigo);
+        setLog(
+          `Parte ${parte + 1}/${totalPartes} — produto ${i + 1}/${fatia.length}: ${codigo}`
+        );
+
+        const urls = [res.img1, res.img2, res.img3, res.img4].filter(Boolean);
+        let numero = 1;
+
+        for (const url of urls) {
+          const { blob, erro } = await montarImagem(url);
+          if (blob) {
+            arquivos.push({
+              caminho: `${codigo}/${codigo}_${numero}.jpg`,
+              dados: new Uint8Array(await blob.arrayBuffer())
+            });
+            numero++;
+            totalImagens++;
+          } else {
+            falhas++;
+            diagnostico.push(`[${codigo}] ${erro}\n   url: ${url}`);
+          }
+        }
+
+        const texto =
+          `CÓDIGO: ${res.codigo}\n` +
+          `PRODUTO: ${res.nome}\n` +
+          `MARCA: ${res.marca}\n\n` +
+          `=== MEDIDAS (estimadas pela IA — confira antes de cadastrar) ===\n` +
+          `PESO: ${res.peso}\n` +
+          `LARGURA: ${res.largura}\n` +
+          `ALTURA: ${res.altura}\n` +
+          `PROFUNDIDADE: ${res.profundidade}\n\n` +
+          `=== DESCRIÇÃO CURTA ===\n${res.curta}\n\n` +
+          `=== DESCRIÇÃO LONGA ===\n${res.longa}\n`;
+
+        arquivos.push({
+          caminho: `${codigo}/${codigo}_descricao.txt`,
+          // "\uFEFF" no começo faz o Bloco de Notas abrir os acentos corretamente.
+          dados: codificador.encode("\uFEFF" + texto)
+        });
+      }
+
+      if (diagnostico.length > 0) {
+        arquivos.push({
+          caminho: `_imagens_que_falharam.txt`,
+          dados: codificador.encode(
+            "\uFEFFImagens que não puderam ser baixadas e o motivo:\n\n" + diagnostico.join("\n\n") + "\n"
+          )
+        });
+      }
+
+      setLog(`Compactando parte ${parte + 1} de ${totalPartes}...`);
+      const nomeZip = totalPartes === 1
+        ? 'produtos_bling.zip'
+        : `produtos_bling_parte${parte + 1}de${totalPartes}.zip`;
+      baixarArquivo(montarZip(arquivos), nomeZip);
+
+      // Uma pausa dá tempo do navegador gravar o arquivo e liberar memória.
+      await espera(1500);
     }
-
-    if (diagnostico.length > 0) {
-      arquivos.push({
-        caminho: `_imagens_que_falharam.txt`,
-        dados: codificador.encode(
-          "\uFEFFImagens que não puderam ser baixadas e o motivo:\n\n" + diagnostico.join("\n\n") + "\n"
-        )
-      });
-    }
-
-    setLog("Compactando o arquivo...");
-    baixarArquivo(montarZip(arquivos), "produtos_bling.zip");
 
     setBaixando(false);
     setLog(
-      `Pacote pronto: ${resultados.length} pastas, ${totalImagens} imagens em 420x420. ` +
+      `Pacote pronto: ${resultados.length} pastas em ${totalPartes} arquivo(s) ZIP, ` +
+      `${totalImagens} imagens em 420x420. ` +
       (falhas > 0
         ? `${falhas} falharam — veja _imagens_que_falharam.txt dentro do ZIP.`
         : `Nenhuma falha.`)
     );
   };
 
-  const ocupado = processando || baixando;
+  const ocupado = processando || baixando || enviandoBling;
 
   return (
     <main className="p-6 md:p-10 max-w-7xl mx-auto">
@@ -270,6 +483,12 @@ export default function Home() {
           Gera descrição curta, descrição longa e busca 4 imagens para cada produto.
         </p>
       </header>
+
+      {aviso && (
+        <div className="bg-amber-50 border border-amber-300 text-amber-900 rounded-lg p-4 mb-6 text-sm">
+          {aviso}
+        </div>
+      )}
 
       <section className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
         <div className="grid md:grid-cols-2 gap-4 mb-4">
@@ -311,7 +530,7 @@ export default function Home() {
           className="w-full p-3 border border-gray-300 rounded-lg text-gray-900 bg-white font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
 
-        <div className="flex flex-wrap gap-3 mt-4">
+        <div className="flex flex-wrap items-end gap-3 mt-4">
           <button
             onClick={iniciarProcessamento}
             disabled={ocupado || !textoColado.trim()}
@@ -335,17 +554,206 @@ export default function Home() {
           >
             Baixar CSV
           </button>
+
+          {ocupado && (
+            <button
+              onClick={() => { pararRef.current = true; }}
+              className="px-6 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold transition-colors"
+            >
+              Parar
+            </button>
+          )}
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 mb-1">
+              Produtos por ZIP
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={porZip}
+              onChange={(e) => setPorZip(Number(e.target.value))}
+              disabled={ocupado}
+              className="w-28 p-2 border border-gray-300 rounded-lg text-gray-900 bg-white text-sm"
+            />
+          </div>
+
+          <button
+            onClick={limparHistorico}
+            disabled={ocupado || resultados.length === 0}
+            className="px-4 py-2.5 text-sm text-gray-600 hover:text-red-600 underline disabled:opacity-40 disabled:no-underline"
+          >
+            Limpar histórico
+          </button>
         </div>
 
         <p className="text-xs text-gray-500 mt-3">
-          O ZIP traz uma pasta por código do produto, com as imagens em {LADO_MOLDURA}x{LADO_MOLDURA}px
-          (foto de até {LADO_FOTO}x{LADO_FOTO}px centralizada em fundo branco) e um .txt com as descrições.
+          Cada produto é salvo no navegador assim que fica pronto, então uma queda de energia
+          não faz perder o lote: ao reabrir a página, tudo volta e o ZIP pode ser baixado de novo.
+          Reprocessar a mesma lista pula o que já está pronto e não gasta créditos à toa.
         </p>
       </section>
 
+      <section className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
+        <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
+          <div>
+            <h2 className="text-lg font-bold text-gray-900">Enviar para o Bling</h2>
+            <p className="text-sm text-gray-600">
+              Atualiza os produtos que já existem no seu Bling, procurando pelo código.
+            </p>
+          </div>
+
+          {!bling.configurado ? (
+            <span className="text-sm text-amber-700 bg-amber-50 border border-amber-300 rounded px-3 py-1.5">
+              Falta configurar BLING_CLIENT_ID e BLING_CLIENT_SECRET na Vercel
+            </span>
+          ) : bling.conectado ? (
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-green-700 bg-green-50 border border-green-300 rounded px-3 py-1.5">
+                Conectado
+              </span>
+              <button onClick={desconectarBling} className="text-sm text-gray-600 underline hover:text-red-600">
+                desconectar
+              </button>
+            </div>
+          ) : (
+            <a
+              href="/api/bling/autorizar"
+              className="px-5 py-2.5 bg-gray-900 hover:bg-gray-800 text-white rounded-lg font-semibold text-sm"
+            >
+              Conectar ao Bling
+            </a>
+          )}
+        </div>
+
+        {bling.conectado && (
+          <>
+            <div className="flex flex-wrap items-end gap-3">
+              <button
+                onClick={() => mandarParaBling(resultados.slice(0, 1), true)}
+                disabled={ocupado || resultados.length === 0}
+                className="px-5 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-lg font-semibold text-sm disabled:opacity-50"
+              >
+                1. Simular o primeiro
+              </button>
+
+              <button
+                onClick={() => mandarParaBling(resultados.slice(0, 1), false)}
+                disabled={ocupado || resultados.length === 0}
+                className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold text-sm disabled:opacity-50"
+              >
+                2. Enviar só o primeiro
+              </button>
+
+              <button
+                onClick={() => {
+                  if (confirm(`Isso vai alterar ${resultados.length} produtos no seu Bling de verdade. Confirma?`)) {
+                    mandarParaBling(resultados, false);
+                  }
+                }}
+                disabled={ocupado || resultados.length === 0}
+                className="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold text-sm disabled:opacity-50"
+              >
+                3. Enviar todos ({resultados.length})
+              </button>
+
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={sobrescrever}
+                  onChange={(e) => setSobrescrever(e.target.checked)}
+                  disabled={ocupado}
+                  className="w-4 h-4"
+                />
+                Sobrescrever o que já está preenchido no Bling
+              </label>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  Unidade das dimensões
+                </label>
+                <select
+                  value={unidadeMedida}
+                  onChange={(e) => setUnidadeMedida(Number(e.target.value))}
+                  disabled={ocupado}
+                  className="p-2 border border-gray-300 rounded-lg text-gray-900 bg-white text-sm"
+                >
+                  <option value={1}>1 — metros</option>
+                  <option value={2}>2 — centímetros</option>
+                  <option value={3}>3 — milímetros</option>
+                </select>
+              </div>
+            </div>
+
+            <p className="text-xs text-gray-500 mt-3">
+              Siga na ordem: simule, confira, mande um produto só, veja no Bling se ficou certo,
+              e só então envie o lote. Sem marcar &quot;sobrescrever&quot;, marca, peso e dimensões
+              só entram nos campos que estiverem vazios no Bling — as descrições sempre são atualizadas.
+              A unidade escolhida vale apenas para produtos que ainda não têm dimensões cadastradas;
+              nos demais, a unidade que já está no Bling é respeitada.
+            </p>
+          </>
+        )}
+      </section>
+
       <div className="bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-sm min-h-[56px] flex items-center mb-6">
-        {log || "Pronto para processar."}
+        {log || (resultados.length > 0
+          ? `${resultados.length} produto(s) no histórico. Pronto para baixar.`
+          : "Pronto para processar.")}
       </div>
+
+      {envios.length > 0 && (
+        <section className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
+          <h3 className="font-bold text-gray-900 mb-3">Resultado do envio</h3>
+          <div className="space-y-2 max-h-96 overflow-y-auto text-sm">
+            {envios.map((e, i) => (
+              <div key={i} className="border-b border-gray-100 pb-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-semibold text-gray-900">{e.codigo}</span>
+                  {e.erro ? (
+                    <span className="text-red-600">falhou</span>
+                  ) : e.simulado ? (
+                    <span className="text-slate-600">simulado</span>
+                  ) : e.enviado ? (
+                    <span className="text-green-700">atualizado</span>
+                  ) : (
+                    <span className="text-gray-500">sem alteração</span>
+                  )}
+                </div>
+
+                {e.erro && <div className="text-red-600 text-xs mt-1">{e.erro}</div>}
+                {e.aviso && <div className="text-gray-600 text-xs mt-1">{e.aviso}</div>}
+
+                {e.alterados && e.alterados.length > 0 && (
+                  <div className="text-xs text-gray-700 mt-1">
+                    Alterar: {e.alterados.join(', ')}
+                  </div>
+                )}
+                {e.ignorados && e.ignorados.length > 0 && (
+                  <div className="text-xs text-amber-700 mt-1">
+                    Não alterado: {e.ignorados.join('; ')}
+                  </div>
+                )}
+                {e.avisosBling && e.avisosBling.length > 0 && (
+                  <div className="text-xs text-amber-700 mt-1">
+                    Bling avisou: {e.avisosBling.join('; ')}
+                  </div>
+                )}
+                {e.corpo && (
+                  <details className="mt-1">
+                    <summary className="text-xs text-blue-600 cursor-pointer">
+                      ver o que seria enviado
+                    </summary>
+                    <pre className="text-[11px] bg-gray-50 p-2 rounded mt-1 overflow-x-auto text-gray-800">
+                      {JSON.stringify(e.corpo, null, 2)}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {resultados.length > 0 && (
         <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -363,7 +771,7 @@ export default function Home() {
               </thead>
               <tbody>
                 {resultados.map((res, index) => {
-                  const falhou = res.curta.startsWith("Erro IA:");
+                  const falhou = deuErro(res);
                   return (
                     <tr key={index} className="border-b border-gray-100 align-top hover:bg-gray-50">
                       <td className="p-3 text-gray-900 font-mono">{res.codigo}</td>
