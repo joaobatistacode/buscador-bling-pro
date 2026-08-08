@@ -8,7 +8,7 @@ const CAMPOS_COPIAVEIS = [
   'dataValidade', 'unidade', 'pesoLiquido', 'pesoBruto', 'volumes',
   'itensPorCaixa', 'gtin', 'gtinEmbalagem', 'tipoProducao', 'condicao',
   'freteGratis', 'marca', 'descricaoComplementar', 'linkExterno', 'observacoes',
-  'categoria', 'estoque', 'dimensoes', 'tributacao', 'midia', 'linhaProduto',
+  'categoria', 'estoque', 'dimensoes', 'tributacao', 'linhaProduto',
 ] as const;
 
 // O Bling limita a descrição curta; cortar aqui evita perder a requisição toda.
@@ -171,6 +171,7 @@ export async function POST(request: Request) {
 
   const alterados: string[] = [];
   const ignorados: string[] = [];
+  const avisos: string[] = [];
 
   // Descrições: é o objetivo do app, então sempre entram.
   if (!semInformacao(curta)) {
@@ -180,6 +181,8 @@ export async function POST(request: Request) {
   if (!semInformacao(longa)) {
     corpo.descricaoComplementar = String(longa);
     alterados.push('descricaoComplementar');
+  } else {
+    avisos.push('A descrição complementar não foi enviada porque a descrição longa chegou vazia.');
   }
 
   // Ficha: por padrão só preenche o que está vazio no Bling, para não
@@ -240,7 +243,9 @@ export async function POST(request: Request) {
     if (sobrescrever || !jaTem) {
       corpo.midia = {
         ...(atual.midia || {}),
-        imagens: { externas: links.map((link) => ({ link })) },
+        // `externas` e `internas` são campos somente de leitura. O Bling
+        // recebe novas imagens pelo campo de escrita `imagensURL`.
+        imagens: { imagensURL: links.map((link) => ({ link })) },
       };
       alterados.push(`${links.length} imagem(ns)`);
     } else {
@@ -251,7 +256,7 @@ export async function POST(request: Request) {
   if (alterados.length === 0) {
     return Response.json({
       codigo, idProduto, enviado: false, alterados, ignorados,
-      aviso: 'Nada a alterar neste produto.',
+      aviso: [avisos.join(' '), 'Nada a alterar neste produto.'].filter(Boolean).join(' '),
     });
   }
 
@@ -259,7 +264,7 @@ export async function POST(request: Request) {
   if (simular) {
     return Response.json({
       codigo, idProduto, enviado: false, simulado: true,
-      alterados, ignorados, corpo,
+      alterados, ignorados, aviso: avisos.join(' ') || undefined, corpo,
     });
   }
 
@@ -280,6 +285,7 @@ export async function POST(request: Request) {
 
   return Response.json({
     codigo, idProduto, enviado: true, alterados, ignorados,
+    aviso: avisos.join(' ') || undefined,
     avisosBling: envio.corpo?.data?.warnings || [],
   });
 }
