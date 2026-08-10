@@ -43,7 +43,7 @@ async function buscarImagensSerper(termo: string, chaveSerper: string, debug: an
         'X-API-KEY': chaveSerper,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ q: termo, gl: 'br', hl: 'pt-br', num: 20 })
+      body: JSON.stringify({ q: termo, gl: 'br', hl: 'pt-br', num: 10 })
     });
 
     const dados = await res.json();
