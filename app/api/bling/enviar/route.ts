@@ -64,6 +64,14 @@ function paraCentimetros(texto: any): number | null {
   return Math.round(cm * 100) / 100;
 }
 
+// A IA e a interface trabalham em centímetros. O Bling, porém, interpreta o
+// número conforme a unidade salva no produto: 0 = m, 1 = cm, 2 = mm.
+function centimetrosNaUnidade(cm: number, unidade: number): number {
+  if (unidade === 0) return Math.round((cm / 100) * 10000) / 10000;
+  if (unidade === 2) return Math.round((cm * 10) * 100) / 100;
+  return cm;
+}
+
 async function chamarBling(caminho: string, token: string, init?: RequestInit) {
   const res = await fetch(`${BLING_API}${caminho}`, {
     ...init,
@@ -217,21 +225,28 @@ export async function POST(request: Request) {
   const unidadeDoProduto = atual.dimensoes?.unidadeMedida;
   const unidadeFinal = unidadeDoProduto ?? unidadeMedida;
 
-  const medidas: Record<string, number> = {};
+  const medidasCm: Record<string, number> = {};
   for (const [nome, valor] of [['largura', largura], ['altura', altura], ['profundidade', profundidade]] as const) {
     const cm = paraCentimetros(valor);
     if (cm !== null) {
-      if (podeGravar(nome, atual.dimensoes?.[nome])) medidas[nome] = cm;
+      if (podeGravar(nome, atual.dimensoes?.[nome])) medidasCm[nome] = cm;
     } else if (!semInformacao(valor)) {
       ignorados.push(`${nome} "${valor}" (unidade não reconhecida)`);
     }
   }
 
-  if (Object.keys(medidas).length > 0) {
-    if (unidadeFinal === undefined || unidadeFinal === null) {
-      ignorados.push('dimensões (o produto não tem unidade de medida definida no Bling)');
+  if (Object.keys(medidasCm).length > 0) {
+    const codigoUnidade = Number(unidadeFinal);
+    if (![0, 1, 2].includes(codigoUnidade)) {
+      ignorados.push('dimensões (unidade de medida inválida ou não definida no Bling)');
     } else {
-      corpo.dimensoes = { ...(atual.dimensoes || {}), ...medidas, unidadeMedida: unidadeFinal };
+      const medidas = Object.fromEntries(
+        Object.entries(medidasCm).map(([nome, cm]) => [
+          nome,
+          centimetrosNaUnidade(cm, codigoUnidade),
+        ])
+      );
+      corpo.dimensoes = { ...(atual.dimensoes || {}), ...medidas, unidadeMedida: codigoUnidade };
       alterados.push(`dimensões (${Object.keys(medidas).join(', ')})`);
     }
   }
