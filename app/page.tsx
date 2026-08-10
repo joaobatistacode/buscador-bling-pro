@@ -3,6 +3,9 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { montarZip, type ArquivoZip } from './zip';
 import { enviarProduto, type ResultadoEnvio } from './enviar-bling';
+import { ProductReview } from './components/product-review';
+import { WorkflowStepper, type EtapaFluxo } from './components/workflow-stepper';
+import { type CampoImagem, type ProdutoResultado } from './produtos';
 
 const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -19,8 +22,13 @@ const CHAVE_HISTORICO = 'buscador-bling:resultados';
 // fica grande demais para o navegador montar de uma vez só.
 const PADRAO_POR_ZIP = 100;
 
-const CAMPOS_IMAGEM = ['img1', 'img2', 'img3', 'img4'] as const;
-type CampoImagem = (typeof CAMPOS_IMAGEM)[number];
+const ETAPAS: EtapaFluxo[] = [
+  { numero: 1, titulo: 'Importar', descricao: 'Cole a lista e confira as credenciais.' },
+  { numero: 2, titulo: 'Processar', descricao: 'Gere imagens, descrições e ficha técnica.' },
+  { numero: 3, titulo: 'Revisar', descricao: 'Confira e edite produto por produto.' },
+  { numero: 4, titulo: 'Aprovar', descricao: 'Valide o lote antes de qualquer envio.' },
+  { numero: 5, titulo: 'Enviar', descricao: 'Simule e envie os produtos ao Bling.' },
+];
 
 const CORES_VARIANTES = new Set([
   'AMARELO', 'AMARELA', 'AZUL', 'BEGE', 'BRANCO', 'BRANCA', 'CINZA',
@@ -170,10 +178,12 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 
 export default function Home() {
   const router = useRouter();
+  const [etapaAtual, setEtapaAtual] = useState(1);
+  const [loteAprovado, setLoteAprovado] = useState(false);
   const [textoColado, setTextoColado] = useState('');
   const [apiKeyGemini, setApiKeyGemini] = useState('');
   const [apiKeyImg, setApiKeyImg] = useState('');
-  const [resultados, setResultados] = useState<any[]>([]);
+  const [resultados, setResultados] = useState<ProdutoResultado[]>([]);
   const [processando, setProcessando] = useState(false);
   const [baixando, setBaixando] = useState(false);
   const [log, setLog] = useState('');
@@ -234,7 +244,7 @@ export default function Home() {
   };
 
   // Percorre os produtos mandando (ou simulando) para o Bling.
-  const mandarParaBling = async (produtos: any[], simular: boolean) => {
+  const mandarParaBling = async (produtos: ProdutoResultado[], simular: boolean) => {
     if (produtos.length === 0) return;
 
     setEnviandoBling(true);
@@ -274,7 +284,7 @@ export default function Home() {
   };
 
   // Grava a cada produto: se faltar energia, no máximo um produto se perde.
-  const salvarHistorico = (dados: any[]) => {
+  const salvarHistorico = (dados: ProdutoResultado[]) => {
     try {
       localStorage.setItem(CHAVE_HISTORICO, JSON.stringify(dados));
     } catch {
@@ -289,6 +299,8 @@ export default function Home() {
     if (!confirm('Isso apaga todos os produtos já processados. Confirma?')) return;
     localStorage.removeItem(CHAVE_HISTORICO);
     setResultados([]);
+    setLoteAprovado(false);
+    setEtapaAtual(1);
     setAviso('');
     setLog('Histórico apagado.');
   };
@@ -320,12 +332,27 @@ export default function Home() {
 
     setResultados(proximos);
     salvarHistorico(proximos);
+    setLoteAprovado(false);
     setEnvios([]);
     setAviso(
       selecionar
         ? 'Imagem restaurada. Faça uma nova simulação antes de enviar.'
         : 'Imagem removida do envio. Ela pode ser restaurada antes de enviar.'
     );
+  };
+
+  const atualizarResultado = (
+    indiceProduto: number,
+    campo: keyof ProdutoResultado,
+    valor: string
+  ) => {
+    const proximos = resultados.map((produto, indice) =>
+      indice === indiceProduto ? { ...produto, [campo]: valor } : produto
+    );
+    setResultados(proximos);
+    salvarHistorico(proximos);
+    setEnvios([]);
+    setLoteAprovado(false);
   };
 
   const iniciarProcessamento = async () => {
@@ -343,7 +370,7 @@ export default function Home() {
     setProgresso({ atual: 0, total: linhas.length });
 
     // Mantém o que já existe e vai atualizando por código.
-    const porCodigo = new Map<string, any>(resultados.map(r => [r.codigo, r]));
+    const porCodigo = new Map<string, ProdutoResultado>(resultados.map(r => [r.codigo, r]));
     let pulados = 0;
     let cotaAcabou = false;
 
@@ -430,7 +457,8 @@ export default function Home() {
         const valorDaFicha = (campo: 'peso' | 'largura' | 'altura' | 'profundidade') =>
           anterior && !semInformacao(anterior[campo]) ? anterior[campo] : dados[campo] || "";
         const fichaComplementada = anterior &&
-          ['peso', 'largura', 'altura', 'profundidade'].some(campo => !semInformacao(anterior[campo]));
+          (['peso', 'largura', 'altura', 'profundidade'] as const)
+            .some(campo => !semInformacao(anterior[campo]));
 
         porCodigo.set(codigo, {
           ...(anterior || {}),
@@ -479,6 +507,10 @@ export default function Home() {
         `. ${comErro} com falha na descrição, ${semImagem} sem imagem.`
       );
     }
+    if (lista.length > 0) {
+      setLoteAprovado(false);
+      setEtapaAtual(3);
+    }
   };
 
   const exportarCSV = () => {
@@ -487,7 +519,7 @@ export default function Home() {
       "Código;Produto;Marca;Peso;Largura;Altura;Profundidade;Origem das medidas;Código de referência;" +
       "Descrição Curta;Descrição;Imagem 1;Imagem 2;Imagem 3;Imagem 4\n";
 
-    const aspas = (valor: string) => `"${(valor || "").replace(/"/g, '""')}"`;
+    const aspas = (valor: unknown) => `"${String(valor || "").replace(/"/g, '""')}"`;
 
     const linhasCSV = resultados.map(r => [
       r.codigo, r.nome, r.marca, r.peso, r.largura, r.altura, r.profundidade,
@@ -540,7 +572,8 @@ export default function Home() {
           `Parte ${parte + 1}/${totalPartes} — produto ${i + 1}/${fatia.length}: ${codigo}`
         );
 
-        const urls = [res.img1, res.img2, res.img3, res.img4].filter(Boolean);
+        const urls = [res.img1, res.img2, res.img3, res.img4]
+          .filter((url): url is string => Boolean(url));
         let numero = 1;
 
         for (const url of urls) {
@@ -620,415 +653,521 @@ export default function Home() {
     router.refresh();
   };
 
+  const linhasImportadas = textoColado.trim()
+    ? textoColado.trim().split('\n').filter(linha => linha.trim()).length
+    : 0;
+  const comErro = resultados.filter(deuErro).length;
+  const semImagem = resultados.filter(produto => !produto.img1).length;
+  const medidasParaConferir = resultados.filter(produto =>
+    produto.origemMedidas !== 'REAPROVEITADO'
+  ).length;
+
+  const podeAcessarEtapa = (numero: number) => {
+    if (numero === 1) return true;
+    if (numero === 2) return linhasImportadas > 0 || resultados.length > 0;
+    if (numero === 3 || numero === 4) return resultados.length > 0;
+    if (numero === 5) return resultados.length > 0 && loteAprovado;
+    return false;
+  };
+
+  const aprovarLote = () => {
+    setLoteAprovado(true);
+    setEnvios([]);
+    setAviso(`${resultados.length} produto(s) aprovados e liberados para simulação no Bling.`);
+    setEtapaAtual(5);
+  };
+
   return (
-    <main className="p-6 md:p-10 max-w-7xl mx-auto">
-      <header className="mb-8 flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Enriquecedor Bling PRO</h1>
-          <p className="text-gray-600 mt-1">
-            Gera descrição curta, descrição longa e busca 4 imagens para cada produto.
-          </p>
+    <main className="min-h-screen bg-slate-100 text-slate-950">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-5 md:px-8">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-lg font-black text-white shadow-sm">
+              B
+            </div>
+            <div>
+              <h1 className="text-lg font-bold tracking-tight text-slate-950 md:text-xl">Enriquecedor Bling PRO</h1>
+              <p className="text-xs text-slate-500">Preparação segura de produtos para marketplaces</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="hidden rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 sm:inline">
+              Sessão protegida
+            </span>
+            <button
+              type="button"
+              onClick={sairAplicacao}
+              className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+            >
+              Sair
+            </button>
+          </div>
         </div>
-        <button
-          type="button"
-          onClick={sairAplicacao}
-          className="shrink-0 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-        >
-          Sair
-        </button>
       </header>
 
-      {aviso && (
-        <div className="bg-amber-50 border border-amber-300 text-amber-900 rounded-lg p-4 mb-6 text-sm">
-          {aviso}
-        </div>
-      )}
+      <div className="mx-auto max-w-7xl px-5 py-6 md:px-8 md:py-8">
+        <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:p-5">
+          <WorkflowStepper
+            etapas={ETAPAS}
+            atual={etapaAtual}
+            podeAcessar={podeAcessarEtapa}
+            aoSelecionar={setEtapaAtual}
+          />
+        </section>
 
-      <section className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
-        <div className="grid md:grid-cols-2 gap-4 mb-4">
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1">
-              Chave da API do Gemini
-            </label>
-            <input
-              type="password"
-              placeholder="Cole aqui a chave do Gemini"
-              value={apiKeyGemini}
-              onChange={(e) => setApiKeyGemini(e.target.value)}
-              className="w-full p-3 border border-gray-300 rounded-lg text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1">
-              Chave da API Serper <span className="font-normal text-gray-500">(busca de imagens)</span>
-            </label>
-            <input
-              type="password"
-              placeholder="Cole aqui a chave do serper.dev"
-              value={apiKeyImg}
-              onChange={(e) => setApiKeyImg(e.target.value)}
-              className="w-full p-3 border border-gray-300 rounded-lg text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-        </div>
-
-        <label className="block text-sm font-semibold text-gray-700 mb-1">
-          Produtos <span className="font-normal text-gray-500">(cole do Excel: código na 1ª coluna, nome na 2ª)</span>
-        </label>
-        <textarea
-          placeholder={"16504\tENCORD UKULELE SG NAILON SOPRANO 10981\n16503\tSPEAKON FEMEA ROXTONE 4 PINOS RP-017 PRETO"}
-          value={textoColado}
-          onChange={(e) => setTextoColado(e.target.value)}
-          rows={6}
-          className="w-full p-3 border border-gray-300 rounded-lg text-gray-900 bg-white font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-
-        <div className="flex flex-wrap items-end gap-3 mt-4">
-          <button
-            onClick={iniciarProcessamento}
-            disabled={ocupado || !textoColado.trim()}
-            className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:hover:bg-blue-600"
-          >
-            {processando ? `Processando ${progresso.atual}/${progresso.total}...` : 'Iniciar'}
-          </button>
-
-          <button
-            onClick={baixarPacote}
-            disabled={ocupado || resultados.length === 0}
-            className="px-6 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:hover:bg-purple-600"
-          >
-            {baixando ? 'Montando pacote...' : 'Baixar pastas (ZIP)'}
-          </button>
-
-          <button
-            onClick={exportarCSV}
-            disabled={ocupado || resultados.length === 0}
-            className="px-6 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:hover:bg-green-600"
-          >
-            Baixar CSV
-          </button>
-
-          {ocupado && (
-            <button
-              onClick={() => { pararRef.current = true; }}
-              className="px-6 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold transition-colors"
-            >
-              Parar
+        {aviso && (
+          <div role="status" className="mb-6 flex items-start justify-between gap-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <span>{aviso}</span>
+            <button type="button" onClick={() => setAviso('')} aria-label="Fechar aviso" className="font-bold text-amber-700">
+              ×
             </button>
-          )}
-
-          <div>
-            <label className="block text-xs font-semibold text-gray-700 mb-1">
-              Produtos por ZIP
-            </label>
-            <input
-              type="number"
-              min={1}
-              value={porZip}
-              onChange={(e) => setPorZip(Number(e.target.value))}
-              disabled={ocupado}
-              className="w-28 p-2 border border-gray-300 rounded-lg text-gray-900 bg-white text-sm"
-            />
           </div>
-
-          <button
-            onClick={limparHistorico}
-            disabled={ocupado || resultados.length === 0}
-            className="px-4 py-2.5 text-sm text-gray-600 hover:text-red-600 underline disabled:opacity-40 disabled:no-underline"
-          >
-            Limpar histórico
-          </button>
-        </div>
-
-        <p className="text-xs text-gray-500 mt-3">
-          Cada produto é salvo no navegador assim que fica pronto, então uma queda de energia
-          não faz perder o lote: ao reabrir a página, tudo volta e o ZIP pode ser baixado de novo.
-          Reprocessar a mesma lista pula o que já está pronto e não gasta créditos à toa.
-        </p>
-      </section>
-
-      <section className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
-        <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
-          <div>
-            <h2 className="text-lg font-bold text-gray-900">Enviar para o Bling</h2>
-            <p className="text-sm text-gray-600">
-              Atualiza os produtos que já existem no seu Bling, procurando pelo código.
-            </p>
-          </div>
-
-          {!bling.configurado ? (
-            <span className="text-sm text-amber-700 bg-amber-50 border border-amber-300 rounded px-3 py-1.5">
-              Falta configurar BLING_CLIENT_ID e BLING_CLIENT_SECRET na Vercel
-            </span>
-          ) : bling.conectado ? (
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-green-700 bg-green-50 border border-green-300 rounded px-3 py-1.5">
-                Conectado
-              </span>
-              <button onClick={desconectarBling} className="text-sm text-gray-600 underline hover:text-red-600">
-                desconectar
-              </button>
-            </div>
-          ) : (
-            <a
-              href="/api/bling/autorizar"
-              className="px-5 py-2.5 bg-gray-900 hover:bg-gray-800 text-white rounded-lg font-semibold text-sm"
-            >
-              Conectar ao Bling
-            </a>
-          )}
-        </div>
-
-        {bling.conectado && (
-          <>
-            <div className="flex flex-wrap items-end gap-3">
-              <button
-                onClick={() => mandarParaBling(resultados.slice(0, 1), true)}
-                disabled={ocupado || resultados.length === 0}
-                className="px-5 py-2.5 bg-slate-600 hover:bg-slate-700 text-white rounded-lg font-semibold text-sm disabled:opacity-50"
-              >
-                1. Simular o primeiro
-              </button>
-
-              <button
-                onClick={() => mandarParaBling(resultados.slice(0, 1), false)}
-                disabled={ocupado || resultados.length === 0}
-                className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold text-sm disabled:opacity-50"
-              >
-                2. Enviar só o primeiro
-              </button>
-
-              <button
-                onClick={() => {
-                  if (confirm(`Isso vai alterar ${resultados.length} produtos no seu Bling de verdade. Confirma?`)) {
-                    mandarParaBling(resultados, false);
-                  }
-                }}
-                disabled={ocupado || resultados.length === 0}
-                className="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold text-sm disabled:opacity-50"
-              >
-                3. Enviar todos ({resultados.length})
-              </button>
-
-              <label className="flex items-center gap-2 text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={sobrescrever}
-                  onChange={(e) => setSobrescrever(e.target.checked)}
-                  disabled={ocupado}
-                  className="w-4 h-4"
-                />
-                Sobrescrever o que já está preenchido no Bling
-              </label>
-
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  Unidade das dimensões
-                </label>
-                <select
-                  value={unidadeMedida}
-                  onChange={(e) => setUnidadeMedida(Number(e.target.value))}
-                  disabled={ocupado}
-                  className="p-2 border border-gray-300 rounded-lg text-gray-900 bg-white text-sm"
-                >
-                  <option value={0}>0 — metros</option>
-                  <option value={1}>1 — centímetros</option>
-                  <option value={2}>2 — milímetros</option>
-                </select>
-              </div>
-            </div>
-
-            <p className="text-xs text-gray-500 mt-3">
-              Siga na ordem: simule, confira, mande um produto só, veja no Bling se ficou certo,
-              e só então envie o lote. Sem marcar &quot;sobrescrever&quot;, marca, peso e dimensões
-              só entram nos campos que estiverem vazios no Bling — as descrições sempre são atualizadas.
-              A unidade escolhida vale apenas para produtos que ainda não têm dimensões cadastradas;
-              nos demais, a unidade que já está no Bling é respeitada.
-            </p>
-          </>
         )}
-      </section>
 
-      <div className="bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-sm min-h-[56px] flex items-center mb-6">
-        {log || (resultados.length > 0
-          ? `${resultados.length} produto(s) no histórico. Pronto para baixar.`
-          : "Pronto para processar.")}
-      </div>
+        {etapaAtual === 1 && (
+          <section>
+            <div className="mb-6">
+              <p className="text-sm font-bold uppercase tracking-[0.18em] text-blue-600">Etapa 1 de 5</p>
+              <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 md:text-3xl">Importe os produtos</h2>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+                Cole duas colunas do Excel: código na primeira e nome do produto na segunda.
+                Nenhum produto será enviado ao Bling nesta etapa.
+              </p>
+            </div>
 
-      {envios.length > 0 && (
-        <section className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
-          <h3 className="font-bold text-gray-900 mb-3">Resultado do envio</h3>
-          <div className="space-y-2 max-h-96 overflow-y-auto text-sm">
-            {envios.map((e, i) => (
-              <div key={i} className="border-b border-gray-100 pb-2">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono font-semibold text-gray-900">{e.codigo}</span>
-                  {e.erro ? (
-                    <span className="text-red-600">falhou</span>
-                  ) : e.simulado ? (
-                    <span className="text-slate-600">simulado</span>
-                  ) : e.enviado ? (
-                    <span className="text-green-700">atualizado</span>
-                  ) : (
-                    <span className="text-gray-500">sem alteração</span>
-                  )}
+            <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="text-sm font-bold text-slate-800">
+                    Chave da API do Gemini
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder="Cole a chave do Gemini"
+                      value={apiKeyGemini}
+                      onChange={evento => setApiKeyGemini(evento.target.value)}
+                      className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 font-normal text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    />
+                  </label>
+                  <label className="text-sm font-bold text-slate-800">
+                    Chave da API Serper
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder="Cole a chave do serper.dev"
+                      value={apiKeyImg}
+                      onChange={evento => setApiKeyImg(evento.target.value)}
+                      className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 font-normal text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    />
+                    <span className="mt-1 block text-xs font-normal text-slate-500">Usada somente para buscar imagens.</span>
+                  </label>
                 </div>
 
-                {e.erro && <div className="text-red-600 text-xs mt-1">{e.erro}</div>}
-                {e.aviso && <div className="text-gray-600 text-xs mt-1">{e.aviso}</div>}
+                <label className="mt-6 block text-sm font-bold text-slate-800">
+                  Lista de produtos
+                  <textarea
+                    placeholder={"16504\tENCORD UKULELE SG NAILON SOPRANO 10981\n16503\tSPEAKON FEMEA ROXTONE 4 PINOS RP-017 PRETO"}
+                    value={textoColado}
+                    onChange={evento => setTextoColado(evento.target.value)}
+                    rows={11}
+                    className="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 p-4 font-mono text-sm leading-6 text-slate-900 outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
+                  />
+                </label>
+              </div>
 
-                {e.alterados && e.alterados.length > 0 && (
-                  <div className="text-xs text-gray-700 mt-1">
-                    Alterar: {e.alterados.join(', ')}
-                  </div>
+              <aside className="h-fit rounded-2xl bg-slate-950 p-6 text-white shadow-sm">
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-300">Resumo da importação</p>
+                <p className="mt-5 text-4xl font-black">{linhasImportadas}</p>
+                <p className="mt-1 text-sm text-slate-300">produtos identificados</p>
+                <div className="my-5 h-px bg-slate-800" />
+                <ul className="space-y-3 text-sm text-slate-300">
+                  <li className="flex gap-2"><span className="text-emerald-400">✓</span> Histórico salvo a cada produto</li>
+                  <li className="flex gap-2"><span className="text-emerald-400">✓</span> Produtos prontos não são cobrados novamente</li>
+                  <li className="flex gap-2"><span className="text-emerald-400">✓</span> Imagens permanecem no padrão 420×420</li>
+                </ul>
+                <button
+                  type="button"
+                  onClick={() => setEtapaAtual(2)}
+                  disabled={!apiKeyGemini || linhasImportadas === 0}
+                  className="mt-6 w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Continuar para processar
+                </button>
+                {!apiKeyGemini && linhasImportadas > 0 && (
+                  <p className="mt-3 text-xs text-amber-300">Informe a chave do Gemini para continuar.</p>
                 )}
-                {e.ignorados && e.ignorados.length > 0 && (
-                  <div className="text-xs text-amber-700 mt-1">
-                    Não alterado: {e.ignorados.join('; ')}
+              </aside>
+            </div>
+
+            {resultados.length > 0 && (
+              <div className="mt-6 flex flex-wrap items-center justify-between gap-4 rounded-xl border border-blue-200 bg-blue-50 p-4">
+                <p className="text-sm text-blue-900">
+                  Há <strong>{resultados.length} produto(s)</strong> salvos no histórico.
+                </p>
+                <button type="button" onClick={() => setEtapaAtual(3)} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700">
+                  Abrir revisão
+                </button>
+              </div>
+            )}
+          </section>
+        )}
+
+        {etapaAtual === 2 && (
+          <section>
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <p className="text-sm font-bold uppercase tracking-[0.18em] text-blue-600">Etapa 2 de 5</p>
+                <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 md:text-3xl">Processe o lote</h2>
+                <p className="mt-2 text-sm text-slate-600">
+                  A IA prepara descrições, imagens, marca, peso e dimensões de cada produto.
+                </p>
+              </div>
+              <span className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700">
+                {linhasImportadas} itens na fila
+              </span>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-950">
+                    {processando ? 'Processamento em andamento' : resultados.length > 0 ? 'Lote disponível' : 'Tudo pronto para começar'}
+                  </h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {processando
+                      ? 'Você pode interromper sem perder os produtos concluídos.'
+                      : 'Revise a quantidade e inicie quando estiver pronto.'}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={iniciarProcessamento}
+                    disabled={ocupado || !textoColado.trim()}
+                    className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {processando ? 'Processando…' : resultados.length > 0 ? 'Processar pendentes' : 'Iniciar processamento'}
+                  </button>
+                  {ocupado && (
+                    <button
+                      type="button"
+                      onClick={() => { pararRef.current = true; }}
+                      className="rounded-xl border border-red-300 bg-red-50 px-5 py-3 text-sm font-bold text-red-700 hover:bg-red-100"
+                    >
+                      Parar com segurança
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-8">
+                <div className="mb-2 flex justify-between text-xs font-bold text-slate-500">
+                  <span>Progresso</span>
+                  <span>{progresso.atual} de {progresso.total || linhasImportadas}</span>
+                </div>
+                <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full rounded-full bg-blue-600 transition-all duration-300"
+                    style={{ width: progresso.total ? Math.min(100, (progresso.atual / progresso.total) * 100) + '%' : '0%' }}
+                  />
+                </div>
+              </div>
+
+              <div aria-live="polite" className="mt-6 min-h-20 rounded-xl bg-slate-950 p-4 font-mono text-sm leading-6 text-emerald-300">
+                {log || 'Aguardando o início do processamento.'}
+              </div>
+
+              {resultados.length > 0 && !processando && (
+                <div className="mt-6 flex flex-wrap items-center justify-between gap-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                  <p className="text-sm text-emerald-900">
+                    <strong>{resultados.length} produto(s)</strong> disponíveis para revisão.
+                  </p>
+                  <button type="button" onClick={() => setEtapaAtual(3)} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700">
+                    Revisar produtos
+                  </button>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {etapaAtual === 3 && resultados.length > 0 && (
+          <section>
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <p className="text-sm font-bold uppercase tracking-[0.18em] text-blue-600">Etapa 3 de 5</p>
+                <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 md:text-3xl">Revise e edite</h2>
+                <p className="mt-2 text-sm text-slate-600">
+                  Selecione um produto, confira imagens e ficha técnica e corrija os textos diretamente.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <span className="rounded-full bg-emerald-100 px-3 py-1.5 text-xs font-bold text-emerald-800">{resultados.length - comErro} prontos</span>
+                {comErro > 0 && <span className="rounded-full bg-red-100 px-3 py-1.5 text-xs font-bold text-red-800">{comErro} com erro</span>}
+              </div>
+            </div>
+
+            <ProductReview
+              produtos={resultados}
+              ocupado={ocupado}
+              aoAlterar={atualizarResultado}
+              aoAlterarImagem={alterarSelecaoImagem}
+            />
+
+            <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-wrap items-end justify-between gap-5">
+                <div className="flex flex-wrap items-end gap-3">
+                  <button type="button" onClick={exportarCSV} disabled={ocupado} className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                    Baixar CSV
+                  </button>
+                  <button type="button" onClick={baixarPacote} disabled={ocupado} className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                    {baixando ? 'Montando ZIP…' : 'Baixar imagens e descrições'}
+                  </button>
+                  <label className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                    Produtos por ZIP
+                    <input
+                      type="number"
+                      min={1}
+                      value={porZip}
+                      onChange={evento => setPorZip(Number(evento.target.value))}
+                      disabled={ocupado}
+                      className="mt-1 block w-28 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-normal text-slate-900"
+                    />
+                  </label>
+                  <button type="button" onClick={limparHistorico} disabled={ocupado} className="px-3 py-2.5 text-sm font-semibold text-red-600 hover:text-red-800 disabled:opacity-40">
+                    Limpar histórico
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEtapaAtual(4)}
+                  disabled={ocupado}
+                  className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-40"
+                >
+                  Continuar para aprovação
+                </button>
+              </div>
+              {log && <p className="mt-4 rounded-lg bg-slate-950 px-4 py-3 font-mono text-xs text-emerald-300">{log}</p>}
+            </div>
+          </section>
+        )}
+
+        {etapaAtual === 4 && resultados.length > 0 && (
+          <section>
+            <div className="mb-6">
+              <p className="text-sm font-bold uppercase tracking-[0.18em] text-blue-600">Etapa 4 de 5</p>
+              <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 md:text-3xl">Aprove o lote</h2>
+              <p className="mt-2 text-sm text-slate-600">
+                Esta confirmação libera a simulação e o envio. Voltar e editar qualquer produto exigirá uma nova aprovação.
+              </p>
+            </div>
+
+            <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p className="text-sm font-semibold text-slate-500">Total do lote</p>
+                <p className="mt-3 text-3xl font-black text-slate-950">{resultados.length}</p>
+                <p className="mt-1 text-xs text-slate-500">produtos processados</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p className="text-sm font-semibold text-slate-500">Descrições</p>
+                <p className={"mt-3 text-3xl font-black " + (comErro ? 'text-red-600' : 'text-emerald-600')}>{comErro}</p>
+                <p className="mt-1 text-xs text-slate-500">itens com erro</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p className="text-sm font-semibold text-slate-500">Imagens</p>
+                <p className={"mt-3 text-3xl font-black " + (semImagem ? 'text-amber-600' : 'text-emerald-600')}>{semImagem}</p>
+                <p className="mt-1 text-xs text-slate-500">itens sem imagem principal</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p className="text-sm font-semibold text-slate-500">Medidas</p>
+                <p className="mt-3 text-3xl font-black text-blue-600">{medidasParaConferir}</p>
+                <p className="mt-1 text-xs text-slate-500">estimadas ou complementadas</p>
+              </div>
+            </div>
+
+            <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
+              <h3 className="text-lg font-bold text-slate-950">Confirmação antes do Bling</h3>
+              <div className="mt-5 grid gap-3 text-sm text-slate-700 md:grid-cols-2">
+                <p className="flex gap-3 rounded-xl bg-slate-50 p-4"><span className="font-bold text-emerald-600">✓</span> Revisei as descrições e a marca dos produtos.</p>
+                <p className="flex gap-3 rounded-xl bg-slate-50 p-4"><span className="font-bold text-emerald-600">✓</span> Conferi pesos e dimensões estimados.</p>
+                <p className="flex gap-3 rounded-xl bg-slate-50 p-4"><span className="font-bold text-emerald-600">✓</span> Removi as imagens que não devem ser enviadas.</p>
+                <p className="flex gap-3 rounded-xl bg-slate-50 p-4"><span className="font-bold text-emerald-600">✓</span> Entendo que ainda haverá uma simulação antes do envio real.</p>
+              </div>
+
+              {(comErro > 0 || semImagem > 0) && (
+                <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                  Existem {comErro} produto(s) com erro de descrição e {semImagem} sem imagem principal.
+                  Você pode voltar à revisão ou aprovar o lote consciente dessas pendências.
+                </div>
+              )}
+
+              <div className="mt-6 flex flex-wrap justify-end gap-3">
+                <button type="button" onClick={() => setEtapaAtual(3)} className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                  Voltar e revisar
+                </button>
+                <button type="button" onClick={aprovarLote} className="rounded-xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white hover:bg-emerald-700">
+                  Aprovar lote e continuar
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {etapaAtual === 5 && loteAprovado && (
+          <section>
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <p className="text-sm font-bold uppercase tracking-[0.18em] text-blue-600">Etapa 5 de 5</p>
+                <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 md:text-3xl">Envie ao Bling</h2>
+                <p className="mt-2 text-sm text-slate-600">
+                  Comece pela simulação, envie um produto de teste e só depois confirme o lote completo.
+                </p>
+              </div>
+              <span className="rounded-full bg-emerald-100 px-4 py-2 text-sm font-bold text-emerald-800">
+                Lote aprovado • {resultados.length} produtos
+              </span>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-6">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-950">Conexão com o Bling</h3>
+                  <p className="mt-1 text-sm text-slate-500">Os produtos são encontrados pelo código informado.</p>
+                </div>
+                {!bling.configurado ? (
+                  <span className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">
+                    Credenciais do Bling não configuradas
+                  </span>
+                ) : bling.conectado ? (
+                  <div className="flex items-center gap-3">
+                    <span className="rounded-full bg-emerald-100 px-3 py-1.5 text-sm font-bold text-emerald-800">● Conectado</span>
+                    <button type="button" onClick={desconectarBling} className="text-sm font-semibold text-slate-500 hover:text-red-600">Desconectar</button>
                   </div>
-                )}
-                {e.avisosBling && e.avisosBling.length > 0 && (
-                  <div className="text-xs text-amber-700 mt-1">
-                    Bling avisou: {e.avisosBling.join('; ')}
-                  </div>
-                )}
-                {e.corpo && (
-                  <details className="mt-1">
-                    <summary className="text-xs text-blue-600 cursor-pointer">
-                      ver o que seria enviado
-                    </summary>
-                    <pre className="text-[11px] bg-gray-50 p-2 rounded mt-1 overflow-x-auto text-gray-800">
-                      {JSON.stringify(e.corpo, null, 2)}
-                    </pre>
-                  </details>
+                ) : (
+                  <a href="/api/bling/autorizar" className="rounded-xl bg-slate-950 px-5 py-3 text-sm font-bold text-white hover:bg-slate-800">
+                    Conectar ao Bling
+                  </a>
                 )}
               </div>
-            ))}
-          </div>
-        </section>
-      )}
 
-      {resultados.length > 0 && (
-        <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 bg-blue-50 border-b border-blue-100 text-sm text-blue-900">
-            Use <strong>×</strong> para não enviar uma imagem. Se mudar de ideia, use{' '}
-            <strong>↶ restaurar</strong>. A imagem original não é apagada.
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-sm">
-              <thead>
-                <tr className="bg-gray-50 border-b border-gray-200">
-                  <th className="p-3 font-semibold text-gray-700">Código</th>
-                  <th className="p-3 font-semibold text-gray-700">Nome</th>
-                  <th className="p-3 font-semibold text-gray-700">Imagens</th>
-                  <th className="p-3 font-semibold text-gray-700">Ficha</th>
-                  <th className="p-3 font-semibold text-gray-700">Descrição Curta</th>
-                  <th className="p-3 font-semibold text-gray-700">Descrição Longa</th>
-                </tr>
-              </thead>
-              <tbody>
-                {resultados.map((res, index) => {
-                  const falhou = deuErro(res);
-                  return (
-                    <tr key={index} className="border-b border-gray-100 align-top hover:bg-gray-50">
-                      <td className="p-3 text-gray-900 font-mono">{res.codigo}</td>
-                      <td className="p-3 text-gray-900 min-w-[180px]">{res.nome}</td>
-                      <td className="p-3">
-                        <div className="grid grid-cols-2 gap-1.5 w-[150px]">
-                          {CAMPOS_IMAGEM.map((campo, i) => {
-                            const img = res[campo];
-                            const removida = res.imagensExcluidas?.[campo];
+              {bling.conectado && (
+                <>
+                  <div className="mt-6 grid gap-4 md:grid-cols-3">
+                    <button
+                      type="button"
+                      onClick={() => mandarParaBling(resultados.slice(0, 1), true)}
+                      disabled={ocupado}
+                      className="rounded-xl border border-blue-200 bg-blue-50 p-5 text-left hover:border-blue-400 disabled:opacity-40"
+                    >
+                      <span className="block text-xs font-bold uppercase tracking-wide text-blue-600">Passo 1</span>
+                      <span className="mt-2 block font-bold text-slate-950">Simular o primeiro</span>
+                      <span className="mt-1 block text-xs leading-5 text-slate-500">Mostra o que seria alterado sem gravar nada.</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => mandarParaBling(resultados.slice(0, 1), false)}
+                      disabled={ocupado}
+                      className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-left hover:border-amber-400 disabled:opacity-40"
+                    >
+                      <span className="block text-xs font-bold uppercase tracking-wide text-amber-700">Passo 2</span>
+                      <span className="mt-2 block font-bold text-slate-950">Enviar um produto</span>
+                      <span className="mt-1 block text-xs leading-5 text-slate-500">Faça a conferência final diretamente no Bling.</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm('Isso vai alterar ' + resultados.length + ' produtos no seu Bling de verdade. Confirma?')) {
+                          mandarParaBling(resultados, false);
+                        }
+                      }}
+                      disabled={ocupado}
+                      className="rounded-xl border border-red-200 bg-red-50 p-5 text-left hover:border-red-400 disabled:opacity-40"
+                    >
+                      <span className="block text-xs font-bold uppercase tracking-wide text-red-700">Passo 3</span>
+                      <span className="mt-2 block font-bold text-slate-950">Enviar todos ({resultados.length})</span>
+                      <span className="mt-1 block text-xs leading-5 text-slate-500">Executa o envio real do lote aprovado.</span>
+                    </button>
+                  </div>
 
-                            if (img) {
-                              return (
-                                <div key={campo} className="relative w-[70px] h-[70px]">
-                                  <a href={img} target="_blank" rel="noreferrer">
-                                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                                    <img
-                                      src={img}
-                                      alt={`${res.nome} ${i + 1}`}
-                                      className="w-[70px] h-[70px] object-cover rounded border border-gray-200 hover:border-blue-500 transition-colors"
-                                    />
-                                  </a>
-                                  <button
-                                    type="button"
-                                    onClick={() => alterarSelecaoImagem(index, campo, false)}
-                                    disabled={ocupado}
-                                    aria-label={`Remover imagem ${i + 1} de ${res.nome} do envio`}
-                                    title="Não enviar esta imagem"
-                                    className="absolute -right-1.5 -top-1.5 w-6 h-6 rounded-full bg-red-600 hover:bg-red-700 text-white font-bold leading-none shadow disabled:opacity-50"
-                                  >
-                                    ×
-                                  </button>
-                                </div>
-                              );
-                            }
+                  <div className="mt-6 flex flex-wrap items-end gap-5 rounded-xl bg-slate-50 p-4">
+                    <label className="flex items-center gap-3 text-sm font-semibold text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={sobrescrever}
+                        onChange={evento => setSobrescrever(evento.target.checked)}
+                        disabled={ocupado}
+                        className="h-4 w-4 rounded border-slate-300"
+                      />
+                      Sobrescrever campos já preenchidos no Bling
+                    </label>
+                    <label className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                      Unidade para novas dimensões
+                      <select
+                        value={unidadeMedida}
+                        onChange={evento => setUnidadeMedida(Number(evento.target.value))}
+                        disabled={ocupado}
+                        className="mt-1 block rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-normal normal-case tracking-normal text-slate-900"
+                      >
+                        <option value={0}>Metros</option>
+                        <option value={1}>Centímetros</option>
+                        <option value={2}>Milímetros</option>
+                      </select>
+                    </label>
+                    {ocupado && (
+                      <button type="button" onClick={() => { pararRef.current = true; }} className="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-bold text-red-700">
+                        Interromper
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
 
-                            if (removida) {
-                              return (
-                                <button
-                                  key={campo}
-                                  type="button"
-                                  onClick={() => alterarSelecaoImagem(index, campo, true)}
-                                  disabled={ocupado}
-                                  aria-label={`Restaurar imagem ${i + 1} de ${res.nome}`}
-                                  title="Restaurar esta imagem"
-                                  className="w-[70px] h-[70px] flex flex-col items-center justify-center text-red-700 text-xs bg-red-50 border border-dashed border-red-300 rounded hover:bg-red-100 disabled:opacity-50"
-                                >
-                                  <span className="text-lg leading-none" aria-hidden="true">↶</span>
-                                  restaurar
-                                </button>
-                              );
-                            }
+              <div aria-live="polite" className="mt-6 min-h-16 rounded-xl bg-slate-950 p-4 font-mono text-sm leading-6 text-emerald-300">
+                {log || 'Aguardando a simulação do primeiro produto.'}
+              </div>
+            </div>
 
-                            return (
-                              <div
-                                key={campo}
-                                className="w-[70px] h-[70px] flex items-center justify-center text-gray-400 text-xs bg-gray-50 border border-dashed border-gray-300 rounded"
-                              >
-                                vazio
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </td>
-                      <td className="p-3 text-xs text-gray-700 whitespace-nowrap">
-                        <div><span className="text-gray-500">Marca:</span> {res.marca}</div>
-                        <div><span className="text-gray-500">Peso:</span> {res.peso}</div>
-                        <div><span className="text-gray-500">L:</span> {res.largura}</div>
-                        <div><span className="text-gray-500">A:</span> {res.altura}</div>
-                        <div><span className="text-gray-500">P:</span> {res.profundidade}</div>
-                        {res.origemMedidas && (
-                          <div className={`mt-2 whitespace-normal rounded px-2 py-1 ${
-                            res.origemMedidas === 'REAPROVEITADO'
-                              ? 'bg-green-50 text-green-800'
-                              : 'bg-amber-50 text-amber-800'
-                          }`} title={res.justificativaMedidas || undefined}>
-                            {res.origemMedidas === 'REAPROVEITADO'
-                              ? `Mesmas medidas do código ${res.codigoReferencia}`
-                              : res.origemMedidas === 'COMPLEMENTADO'
-                                ? 'Ficha anterior complementada — confira'
-                                : 'Estimativa da IA — confira'}
-                          </div>
-                        )}
-                      </td>
-                      <td className={`p-3 max-w-xs ${falhou ? 'text-red-600' : 'text-gray-900'}`}>
-                        {res.curta}
-                      </td>
-                      <td className="p-3 text-gray-700 max-w-md">
-                        <div className="max-h-40 overflow-y-auto whitespace-pre-wrap text-xs">
-                          {res.longa}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
+            {envios.length > 0 && (
+              <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h3 className="font-bold text-slate-950">Resultado da operação</h3>
+                <div className="mt-4 max-h-96 space-y-3 overflow-y-auto">
+                  {envios.map((envio, indice) => (
+                    <div key={envio.codigo + '-' + indice} className="rounded-xl border border-slate-200 p-4 text-sm">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono font-bold text-slate-950">{envio.codigo}</span>
+                        <span className={"rounded-full px-2.5 py-1 text-xs font-bold " + (
+                          envio.erro
+                            ? 'bg-red-100 text-red-700'
+                            : envio.simulado
+                              ? 'bg-blue-100 text-blue-700'
+                              : envio.enviado
+                                ? 'bg-emerald-100 text-emerald-700'
+                                : 'bg-slate-100 text-slate-600'
+                        )}>
+                          {envio.erro ? 'Falhou' : envio.simulado ? 'Simulado' : envio.enviado ? 'Atualizado' : 'Sem alteração'}
+                        </span>
+                      </div>
+                      {envio.erro && <p className="mt-2 text-xs text-red-600">{envio.erro}</p>}
+                      {envio.aviso && <p className="mt-2 text-xs text-slate-600">{envio.aviso}</p>}
+                      {envio.alterados && envio.alterados.length > 0 && <p className="mt-2 text-xs text-slate-700">Alterar: {envio.alterados.join(', ')}</p>}
+                      {envio.ignorados && envio.ignorados.length > 0 && <p className="mt-2 text-xs text-amber-700">Não alterado: {envio.ignorados.join('; ')}</p>}
+                      {envio.avisosBling && envio.avisosBling.length > 0 && <p className="mt-2 text-xs text-amber-700">Bling: {envio.avisosBling.join('; ')}</p>}
+                      {envio.corpo && (
+                        <details className="mt-3">
+                          <summary className="cursor-pointer text-xs font-semibold text-blue-600">Ver dados da simulação</summary>
+                          <pre className="mt-2 overflow-x-auto rounded-lg bg-slate-50 p-3 text-[11px] text-slate-800">
+                            {JSON.stringify(envio.corpo, null, 2)}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+      </div>
     </main>
   );
 }
