@@ -1,8 +1,10 @@
 import { BLING_AUTORIZAR, credenciais } from '../sessao';
+import { naoAutorizado, temAcesso } from '@/lib/acesso';
 
 // Manda o usuário para a tela de autorização do Bling. O Bling volta para
 // /api/bling/callback com o código.
 export async function GET(request: Request) {
+  if (!(await temAcesso())) return naoAutorizado();
   let id: string;
   try {
     ({ id } = credenciais());

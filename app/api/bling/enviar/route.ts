@@ -1,4 +1,5 @@
 import { BLING_API, tokenValido } from '../sessao';
+import { lerCorpoLimitado, naoAutorizado, origemInvalida, origemPermitida, temAcesso } from '@/lib/acesso';
 
 // Campos que o PUT de produto aceita. O PUT do Bling substitui o produto
 // inteiro, então precisamos reenviar o que já existe — mas só o que ele
@@ -101,6 +102,14 @@ function descreveErro(corpo: any, status: number): string {
 }
 
 export async function POST(request: Request) {
+  if (!(await temAcesso())) return naoAutorizado();
+  if (!origemPermitida(request)) return origemInvalida();
+  let corpoPedido: Uint8Array<ArrayBuffer>;
+  try {
+    corpoPedido = await lerCorpoLimitado(request, 1024 * 1024);
+  } catch {
+    return Response.json({ erro: 'Requisição muito grande.' }, { status: 413 });
+  }
   let token: string | null;
   try {
     token = await tokenValido();
@@ -112,7 +121,12 @@ export async function POST(request: Request) {
     return Response.json({ erro: 'Não está conectado ao Bling.' }, { status: 401 });
   }
 
-  const dados = await request.json();
+  let dados;
+  try {
+    dados = JSON.parse(new TextDecoder().decode(corpoPedido));
+  } catch {
+    return Response.json({ erro: 'JSON inválido.' }, { status: 400 });
+  }
   const {
     codigo, curta, longa, marca, peso, largura, altura, profundidade,
     imagens = [], simular = true, sobrescrever = false, unidadeMedida,
