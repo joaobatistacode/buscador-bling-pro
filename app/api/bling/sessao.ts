@@ -34,7 +34,7 @@ export async function guardarSessao(sessao: SessaoBling) {
   const jarro = await cookies();
   jarro.set(COOKIE, JSON.stringify(sessao), {
     httpOnly: true,   // fora do alcance de JavaScript no navegador
-    secure: true,
+    secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     path: '/',
     maxAge: 60 * 60 * 24 * 29, // o refresh_token do Bling dura ~30 dias

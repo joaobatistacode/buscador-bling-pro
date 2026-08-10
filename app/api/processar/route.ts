@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { lerCorpoLimitado, naoAutorizado, origemInvalida, origemPermitida, temAcesso } from '@/lib/acesso';
 
 // Modelo "lite": cota gratuita bem maior que o flash normal, o que importa em lotes grandes.
 const MODELO_GEMINI = 'gemini-flash-lite-latest';
@@ -272,8 +273,16 @@ identificado. Não invente a marca.`;
 }
 
 export async function POST(request: Request) {
+  if (!(await temAcesso())) return naoAutorizado();
+  if (!origemPermitida(request)) return origemInvalida();
+  let corpo: Uint8Array<ArrayBuffer>;
   try {
-    const body = await request.json();
+    corpo = await lerCorpoLimitado(request, 256 * 1024);
+  } catch {
+    return NextResponse.json({ error: 'Requisição muito grande.' }, { status: 413 });
+  }
+  try {
+    const body = JSON.parse(new TextDecoder().decode(corpo));
     const { nome, apiKey, apiKeyImg, buscarImagens = true } = body;
     const referencias: ReferenciaMedidas[] = Array.isArray(body.referencias)
       ? body.referencias.slice(0, 6).map((item: unknown) => {

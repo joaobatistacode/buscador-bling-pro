@@ -1,9 +1,11 @@
 import { cookies } from 'next/headers';
 import { guardarSessao, pedirToken } from '../sessao';
+import { naoAutorizado, temAcesso } from '@/lib/acesso';
 
 // Volta do Bling com o código de autorização. Troca por token e devolve o
 // usuário para a página inicial.
 export async function GET(request: Request) {
+  if (!(await temAcesso())) return naoAutorizado();
   const url = new URL(request.url);
   const codigo = url.searchParams.get('code');
   const state = url.searchParams.get('state');

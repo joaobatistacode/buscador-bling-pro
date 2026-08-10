@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { montarZip, type ArquivoZip } from './zip';
 import { enviarProduto, type ResultadoEnvio } from './enviar-bling';
 
@@ -168,6 +169,7 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 }
 
 export default function Home() {
+  const router = useRouter();
   const [textoColado, setTextoColado] = useState('');
   const [apiKeyGemini, setApiKeyGemini] = useState('');
   const [apiKeyImg, setApiKeyImg] = useState('');
@@ -612,13 +614,28 @@ export default function Home() {
 
   const ocupado = processando || baixando || enviandoBling;
 
+  const sairAplicacao = async () => {
+    await fetch('/api/acesso/sair', { method: 'POST' }).catch(() => null);
+    router.replace('/login');
+    router.refresh();
+  };
+
   return (
     <main className="p-6 md:p-10 max-w-7xl mx-auto">
-      <header className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900">Enriquecedor Bling PRO</h1>
-        <p className="text-gray-600 mt-1">
-          Gera descrição curta, descrição longa e busca 4 imagens para cada produto.
-        </p>
+      <header className="mb-8 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Enriquecedor Bling PRO</h1>
+          <p className="text-gray-600 mt-1">
+            Gera descrição curta, descrição longa e busca 4 imagens para cada produto.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={sairAplicacao}
+          className="shrink-0 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+        >
+          Sair
+        </button>
       </header>
 
       {aviso && (
