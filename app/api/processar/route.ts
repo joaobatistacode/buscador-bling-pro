@@ -35,7 +35,7 @@ function limparHtml(texto: string): string {
 // O Mercado Livre bloqueia acesso anônimo e a Custom Search JSON API do Google
 // foi fechada para novos projetos, então esta é a fonte que resta funcionando.
 async function buscarImagensSerper(termo: string, chaveSerper: string, debug: any[]): Promise<string[]> {
-  let urls = ["", "", "", ""];
+  let urls: string[] = [];
   try {
     const res = await fetch('https://google.serper.dev/images', {
       method: 'POST',
@@ -55,15 +55,58 @@ async function buscarImagensSerper(termo: string, chaveSerper: string, debug: an
       erro: dados.message || dados.error || null,
     });
 
-    if (dados.images && dados.images.length > 0) {
-      urls = dados.images.slice(0, 4).map((img: any) => img.imageUrl);
-      while (urls.length < 4) urls.push("");
+    if (Array.isArray(dados.images)) {
+      urls = dados.images
+        .map((img: any) => String(img.imageUrl || '').trim())
+        .filter((url: string) => /^https?:\/\//i.test(url))
+        .slice(0, 12);
     }
   } catch (e: any) {
     debug.push({ termo, excecao: e.message });
   }
   return urls;
 }
+
+const normalizarBuscaImagem = (nome: string) => nome
+  .replace(/\bENCORD\b/gi, 'ENCORDOAMENTO')
+  .replace(/\bS\/\s*FIO\b/gi, 'SEM FIO')
+  .replace(/\bC\/\s*/gi, 'COM ')
+  .replace(/\bS\/\s*/gi, 'SEM ')
+  .replace(/\bVERM\b/gi, 'VERMELHO')
+  .replace(/\bPTO\b/gi, 'PRETO')
+  .replace(/\bBCO\b/gi, 'BRANCO')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const prepararSitesPreferenciais = (valor: unknown): string[] => {
+  if (!Array.isArray(valor)) return [];
+
+  return [...new Set(valor
+    .map(item => String(item).trim().toLowerCase())
+    .map(site => site.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0])
+    .filter(site => /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/i.test(site))
+  )].slice(0, 6);
+};
+
+const montarTermosImagem = (nome: string, sites: string[]): string[] => {
+  const busca = normalizarBuscaImagem(nome);
+  const palavras = busca.split(' ').filter(Boolean);
+  const genericas = new Set([
+    'MOUSE', 'SEM', 'FIO', 'COM', 'PARA', 'WIN', 'WINDOWS', 'GHZ', '2.4GHZ',
+    'ALCANCE', 'METROS', 'METRO', 'UN', 'UNIDADE',
+  ]);
+  const distintivas = palavras.filter(palavra =>
+    palavra.length > 2 && !genericas.has(palavra.toUpperCase()) && !/^\d+M$/i.test(palavra)
+  );
+  const termoPrincipal = distintivas.length >= 2 ? distintivas.join(' ') : busca;
+
+  return [...new Set([
+    ...sites.map(site => `${termoPrincipal} site:${site}`),
+    termoPrincipal,
+    busca,
+    palavras.slice(-5).join(' '),
+  ].map(termo => termo.trim()).filter(Boolean))];
+};
 
 export interface Ficha {
   curta: string;
@@ -301,12 +344,9 @@ export async function POST(request: Request) {
       : [];
 
     // --- BUSCA DE IMAGENS ---
-    let imagensEncontradas = ["", "", "", ""];
-    const busca = nome.replace(/ENCORD /g, "ENCORDOAMENTO ").replace(/C\/ /g, "COM ").replace(/S\/ /g, "SEM ");
-    const palavras = busca.split(" ");
-    // Termos do mais específico ao mais genérico; para na primeira que trouxer imagem,
-    // para não gastar créditos à toa.
-    const tentativas = [busca, palavras.slice(0, 4).join(" "), palavras.slice(0, 2).join(" ")];
+    const imagensEncontradas = ["", "", "", ""];
+    const sitesPreferenciais = prepararSitesPreferenciais(body.sitesPreferenciais);
+    const tentativas = montarTermosImagem(String(nome || ''), sitesPreferenciais);
     const debugImg: any[] = [];
 
     if (buscarImagens === false) {
@@ -315,10 +355,14 @@ export async function POST(request: Request) {
       for (const tentativa of tentativas) {
         if (!tentativa.trim()) continue;
         const urls = await buscarImagensSerper(tentativa, apiKeyImg.trim(), debugImg);
-        if (urls.some(u => u)) {
-          imagensEncontradas = urls;
-          break;
+        for (const url of urls) {
+          if (!imagensEncontradas.includes(url)) {
+            const vaga = imagensEncontradas.findIndex(item => !item);
+            if (vaga === -1) break;
+            imagensEncontradas[vaga] = url;
+          }
         }
+        if (imagensEncontradas.every(Boolean)) break;
       }
     } else {
       debugImg.push({ erro: "Chave da API Serper não foi preenchida no site." });

@@ -19,6 +19,8 @@ const LADO_FOTO = 350;
 const CHAVE_HISTORICO = 'buscador-bling:resultados';
 const CHAVE_GEMINI_SESSAO = 'buscador-bling:gemini';
 const CHAVE_SERPER_SESSAO = 'buscador-bling:serper';
+const CHAVE_SITES_IMAGENS = 'buscador-bling:sites-imagens';
+const SITES_IMAGENS_PADRAO = 'madeiramadeira.com.br';
 
 // Cada lote vira um ZIP separado. Um ZIP único com centenas de produtos
 // fica grande demais para o navegador montar de uma vez só.
@@ -186,6 +188,7 @@ export default function Home() {
   const [textoColado, setTextoColado] = useState('');
   const [apiKeyGemini, setApiKeyGemini] = useState('');
   const [apiKeyImg, setApiKeyImg] = useState('');
+  const [sitesImagens, setSitesImagens] = useState(SITES_IMAGENS_PADRAO);
   const [resultados, setResultados] = useState<ProdutoResultado[]>([]);
   const [processando, setProcessando] = useState(false);
   const [baixando, setBaixando] = useState(false);
@@ -209,6 +212,7 @@ export default function Home() {
     const quadro = requestAnimationFrame(() => {
       setApiKeyGemini(sessionStorage.getItem(CHAVE_GEMINI_SESSAO) || '');
       setApiKeyImg(sessionStorage.getItem(CHAVE_SERPER_SESSAO) || '');
+      setSitesImagens(localStorage.getItem(CHAVE_SITES_IMAGENS) || SITES_IMAGENS_PADRAO);
     });
 
     try {
@@ -255,13 +259,15 @@ export default function Home() {
   const salvarConfiguracoes = () => {
     sessionStorage.setItem(CHAVE_GEMINI_SESSAO, apiKeyGemini);
     sessionStorage.setItem(CHAVE_SERPER_SESSAO, apiKeyImg);
-    setAviso('Configurações salvas nesta sessão do navegador.');
+    localStorage.setItem(CHAVE_SITES_IMAGENS, sitesImagens);
+    setAviso('Configurações salvas. As chaves valem nesta sessão e os sites ficam neste navegador.');
     setVisaoAtual('fluxo');
   };
 
   const cancelarConfiguracoes = () => {
     setApiKeyGemini(sessionStorage.getItem(CHAVE_GEMINI_SESSAO) || '');
     setApiKeyImg(sessionStorage.getItem(CHAVE_SERPER_SESSAO) || '');
+    setSitesImagens(localStorage.getItem(CHAVE_SITES_IMAGENS) || SITES_IMAGENS_PADRAO);
     setVisaoAtual('fluxo');
   };
 
@@ -377,6 +383,24 @@ export default function Home() {
     setLoteAprovado(false);
   };
 
+  const definirImagemManual = (
+    indiceProduto: number,
+    campo: CampoImagem,
+    url: string
+  ) => {
+    const proximos = resultados.map((produto, indice) => {
+      if (indice !== indiceProduto) return produto;
+      const excluidas = { ...(produto.imagensExcluidas || {}) };
+      delete excluidas[campo];
+      return { ...produto, [campo]: url, imagensExcluidas: excluidas };
+    });
+    setResultados(proximos);
+    salvarHistorico(proximos);
+    setEnvios([]);
+    setLoteAprovado(false);
+    setAviso('Imagem manual aplicada. Faça uma nova simulação antes de enviar ao Bling.');
+  };
+
   const iniciarProcessamento = async () => {
     if (!apiKeyGemini) {
       alert("Insira sua chave do Gemini.");
@@ -406,10 +430,10 @@ export default function Home() {
       const codigo = partes.length > 1 ? partes[0] : `TEMP-${i}`;
       const nome = partes.length > 1 ? partes[1] : partes[0];
 
-      // Produtos completos são pulados. Os antigos que vieram sem peso ou
-      // medidas voltam para a IA, mas conservam as imagens já escolhidas.
+      // Produtos completos são pulados. Os antigos que vieram sem peso,
+      // medidas ou foto voltam ao processamento e preservam o que já está pronto.
       const anterior = porCodigo.get(codigo);
-      if (anterior && !deuErro(anterior) && temMedidasCompletas(anterior)) {
+      if (anterior && !deuErro(anterior) && temMedidasCompletas(anterior) && anterior.img1) {
         pulados++;
         setProgresso({ atual: i + 1, total: linhas.length });
         continue;
@@ -435,9 +459,13 @@ export default function Home() {
               nome,
               apiKey: apiKeyGemini,
               apiKeyImg,
+              sitesPreferenciais: sitesImagens
+                .split(/[\n,]+/)
+                .map(site => site.trim())
+                .filter(Boolean),
               referencias,
-              // Ao completar uma ficha antiga, não gasta nova busca de imagem.
-              buscarImagens: !anterior,
+              // Repete a busca somente quando o produto ainda está sem foto.
+              buscarImagens: !anterior?.img1,
             })
           });
           dados = await res.json();
@@ -500,10 +528,10 @@ export default function Home() {
             : dados.origemMedidas || anterior?.origemMedidas || "",
           codigoReferencia: dados.codigoReferencia || "",
           justificativaMedidas: dados.justificativaMedidas || "",
-          img1: anterior ? anterior.img1 || "" : dados.imagens?.[0] || "",
-          img2: anterior ? anterior.img2 || "" : dados.imagens?.[1] || "",
-          img3: anterior ? anterior.img3 || "" : dados.imagens?.[2] || "",
-          img4: anterior ? anterior.img4 || "" : dados.imagens?.[3] || "",
+          img1: anterior?.img1 || dados.imagens?.[0] || "",
+          img2: anterior?.img2 || dados.imagens?.[1] || "",
+          img3: anterior?.img3 || dados.imagens?.[2] || "",
+          img4: anterior?.img4 || dados.imagens?.[3] || "",
         });
 
         const lista = [...porCodigo.values()];
@@ -776,10 +804,10 @@ export default function Home() {
               <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
                 <div className="mb-6 flex items-start justify-between gap-4 border-b border-slate-200 pb-5">
                   <div>
-                    <h3 className="text-lg font-bold text-slate-950">Chaves das APIs</h3>
-                    <p className="mt-1 text-sm text-slate-500">Necessárias para gerar textos e buscar imagens.</p>
+                    <h3 className="text-lg font-bold text-slate-950">Chaves e busca de imagens</h3>
+                    <p className="mt-1 text-sm text-slate-500">Configure as APIs e os sites que devem ter prioridade.</p>
                   </div>
-                  <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">Nesta sessão</span>
+                  <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">Chaves nesta sessão</span>
                 </div>
 
                 <div className="space-y-5">
@@ -814,11 +842,25 @@ export default function Home() {
                       {apiKeyImg ? 'Chave informada' : 'Ainda não informada'}
                     </span>
                   </label>
+
+                  <label className="block text-sm font-bold text-slate-800">
+                    Sites preferenciais para imagens
+                    <textarea
+                      value={sitesImagens}
+                      onChange={evento => setSitesImagens(evento.target.value)}
+                      rows={4}
+                      placeholder={"madeiramadeira.com.br\nmagazineluiza.com.br"}
+                      className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 font-mono text-sm font-normal text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    />
+                    <span className="mt-2 block text-xs font-normal leading-5 text-slate-500">
+                      Informe um domínio por linha. O sistema consulta esses sites primeiro e completa com a busca geral.
+                    </span>
+                  </label>
                 </div>
 
                 <div className="mt-6 rounded-xl border border-blue-100 bg-blue-50 p-4 text-xs leading-5 text-blue-900">
-                  As chaves ficam somente nesta sessão do navegador. Elas não são adicionadas ao GitHub,
-                  ao histórico de produtos ou ao banco de dados.
+                  As chaves ficam somente nesta sessão do navegador. Os sites preferenciais permanecem
+                  salvos neste navegador. Nada disso é adicionado ao GitHub ou ao banco de dados.
                 </div>
 
                 <div className="mt-6 flex flex-wrap justify-end gap-3">
@@ -1055,6 +1097,7 @@ export default function Home() {
               ocupado={ocupado}
               aoAlterar={atualizarResultado}
               aoAlterarImagem={alterarSelecaoImagem}
+              aoDefinirImagem={definirImagemManual}
             />
 
             <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
