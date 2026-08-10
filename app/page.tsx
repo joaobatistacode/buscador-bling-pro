@@ -21,6 +21,72 @@ const PADRAO_POR_ZIP = 100;
 const CAMPOS_IMAGEM = ['img1', 'img2', 'img3', 'img4'] as const;
 type CampoImagem = (typeof CAMPOS_IMAGEM)[number];
 
+const CORES_VARIANTES = new Set([
+  'AMARELO', 'AMARELA', 'AZUL', 'BEGE', 'BRANCO', 'BRANCA', 'CINZA',
+  'DOURADO', 'DOURADA', 'LARANJA', 'MARROM', 'NATURAL', 'PRETO', 'PRETA',
+  'PRATA', 'ROSA', 'ROXO', 'ROXA', 'VERDE', 'VERMELHO', 'VERMELHA',
+  'BK', 'BLK', 'BLUE', 'GRN', 'NAT', 'NT', 'NTS', 'RED', 'SB', 'SUNBURST', 'WH', 'WHT',
+]);
+
+const PALAVRAS_DESCARTAVEIS = new Set(['A', 'AS', 'COM', 'DA', 'DAS', 'DE', 'DO', 'DOS', 'E', 'EM', 'O', 'OS', 'PARA']);
+
+const semInformacao = (valor: unknown) => {
+  const texto = String(valor ?? '').trim().toUpperCase();
+  return !texto || texto.includes('NÃO INFORMADO') || texto.startsWith('ERRO IA:');
+};
+
+interface ProdutoComMedidas {
+  codigo?: unknown;
+  nome?: unknown;
+  peso?: unknown;
+  largura?: unknown;
+  altura?: unknown;
+  profundidade?: unknown;
+}
+
+const temMedidasCompletas = (produto: ProdutoComMedidas) =>
+  !semInformacao(produto?.peso) &&
+  !semInformacao(produto?.largura) &&
+  !semInformacao(produto?.altura) &&
+  !semInformacao(produto?.profundidade);
+
+const tokensDoProduto = (nome: string) => new Set(
+  nome
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .match(/[A-Z0-9]+(?:[.-][A-Z0-9]+)*/g)
+    ?.filter(token => token.length > 1 && !CORES_VARIANTES.has(token) && !PALAVRAS_DESCARTAVEIS.has(token))
+    ?? []
+);
+
+// Reduz o histórico a poucos candidatos parecidos. A decisão final de que é
+// o mesmo modelo físico continua sendo da IA, com regras conservadoras.
+const selecionarReferencias = (nome: string, codigo: string, produtos: ProdutoComMedidas[]) => {
+  const atuais = tokensDoProduto(nome);
+  if (atuais.size === 0) return [];
+
+  return produtos
+    .filter(produto => String(produto.codigo) !== String(codigo) && temMedidasCompletas(produto))
+    .map(produto => {
+      const candidatos = tokensDoProduto(String(produto.nome || ''));
+      const iguais = [...atuais].filter(token => candidatos.has(token)).length;
+      const similaridade = (2 * iguais) / (atuais.size + candidatos.size || 1);
+      return { produto, iguais, similaridade };
+    })
+    .filter(item => item.iguais >= 2 && item.similaridade >= 0.45)
+    .sort((a, b) => b.similaridade - a.similaridade)
+    .slice(0, 6)
+    .map(({ produto }) => ({
+      codigo: String(produto.codigo),
+      nome: String(produto.nome),
+      peso: String(produto.peso),
+      largura: String(produto.largura),
+      altura: String(produto.altura),
+      profundidade: String(produto.profundidade),
+    }));
+};
+
 // Nome de pasta/arquivo seguro em Windows, macOS e Linux.
 const nomeSeguro = (texto: string) =>
   texto.replace(/[\\/:*?"<>|]/g, '-').trim() || 'sem-codigo';
@@ -289,13 +355,16 @@ export default function Home() {
       const codigo = partes.length > 1 ? partes[0] : `TEMP-${i}`;
       const nome = partes.length > 1 ? partes[1] : partes[0];
 
-      // Já processado com sucesso antes: não gasta crédito de novo.
+      // Produtos completos são pulados. Os antigos que vieram sem peso ou
+      // medidas voltam para a IA, mas conservam as imagens já escolhidas.
       const anterior = porCodigo.get(codigo);
-      if (anterior && !deuErro(anterior)) {
+      if (anterior && !deuErro(anterior) && temMedidasCompletas(anterior)) {
         pulados++;
         setProgresso({ atual: i + 1, total: linhas.length });
         continue;
       }
+
+      const referencias = selecionarReferencias(nome, codigo, [...porCodigo.values()]);
 
       // Se a cota estourar, espera o tempo que o Google pediu e tenta o
       // mesmo produto de novo. Três recusas seguidas significam que a cota
@@ -311,7 +380,14 @@ export default function Home() {
           const res = await fetch('/api/processar', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ nome, apiKey: apiKeyGemini, apiKeyImg })
+            body: JSON.stringify({
+              nome,
+              apiKey: apiKeyGemini,
+              apiKeyImg,
+              referencias,
+              // Ao completar uma ficha antiga, não gasta nova busca de imagem.
+              buscarImagens: !anterior,
+            })
           });
           dados = await res.json();
         } catch (e: any) {
@@ -348,18 +424,34 @@ export default function Home() {
         break;
       }
 
-      if (dados) {
+      if (dados && !(anterior && !deuErro(anterior) && deuErro(dados))) {
+        const valorDaFicha = (campo: 'peso' | 'largura' | 'altura' | 'profundidade') =>
+          anterior && !semInformacao(anterior[campo]) ? anterior[campo] : dados[campo] || "";
+        const fichaComplementada = anterior &&
+          ['peso', 'largura', 'altura', 'profundidade'].some(campo => !semInformacao(anterior[campo]));
+
         porCodigo.set(codigo, {
+          ...(anterior || {}),
           codigo,
           nome,
-          curta: dados.curta || "",
-          longa: dados.longa || "",
-          marca: dados.marca || "",
-          peso: dados.peso || "",
-          largura: dados.largura || "",
-          altura: dados.altura || "",
-          profundidade: dados.profundidade || "",
-          img1: dados.imagens?.[0] || "", img2: dados.imagens?.[1] || "", img3: dados.imagens?.[2] || "", img4: dados.imagens?.[3] || ""
+          curta: anterior?.curta || dados.curta || "",
+          longa: anterior?.longa || dados.longa || "",
+          marca: anterior && !semInformacao(anterior.marca)
+            ? anterior.marca
+            : dados.marca || "",
+          peso: valorDaFicha('peso'),
+          largura: valorDaFicha('largura'),
+          altura: valorDaFicha('altura'),
+          profundidade: valorDaFicha('profundidade'),
+          origemMedidas: fichaComplementada
+            ? 'COMPLEMENTADO'
+            : dados.origemMedidas || anterior?.origemMedidas || "",
+          codigoReferencia: dados.codigoReferencia || "",
+          justificativaMedidas: dados.justificativaMedidas || "",
+          img1: anterior ? anterior.img1 || "" : dados.imagens?.[0] || "",
+          img2: anterior ? anterior.img2 || "" : dados.imagens?.[1] || "",
+          img3: anterior ? anterior.img3 || "" : dados.imagens?.[2] || "",
+          img4: anterior ? anterior.img4 || "" : dados.imagens?.[3] || "",
         });
 
         const lista = [...porCodigo.values()];
@@ -390,13 +482,14 @@ export default function Home() {
   const exportarCSV = () => {
     // Ponto e vírgula para o Excel separar as colunas corretamente
     const cabecalho =
-      "Código;Produto;Marca;Peso;Largura;Altura;Profundidade;" +
+      "Código;Produto;Marca;Peso;Largura;Altura;Profundidade;Origem das medidas;Código de referência;" +
       "Descrição Curta;Descrição;Imagem 1;Imagem 2;Imagem 3;Imagem 4\n";
 
     const aspas = (valor: string) => `"${(valor || "").replace(/"/g, '""')}"`;
 
     const linhasCSV = resultados.map(r => [
       r.codigo, r.nome, r.marca, r.peso, r.largura, r.altura, r.profundidade,
+      r.origemMedidas, r.codigoReferencia,
       r.curta, r.longa, r.img1, r.img2, r.img3, r.img4
     ].map(aspas).join(";")).join("\n");
 
@@ -472,6 +565,12 @@ export default function Home() {
           `LARGURA: ${res.largura}\n` +
           `ALTURA: ${res.altura}\n` +
           `PROFUNDIDADE: ${res.profundidade}\n\n` +
+          `ORIGEM: ${res.origemMedidas === 'REAPROVEITADO'
+            ? `reaproveitado do código ${res.codigoReferencia}`
+            : res.origemMedidas === 'COMPLEMENTADO'
+              ? 'ficha anterior complementada pela IA'
+              : 'estimativa da IA'}\n` +
+          `OBSERVAÇÃO: ${res.justificativaMedidas || 'Confira as medidas antes de cadastrar.'}\n\n` +
           `=== DESCRIÇÃO CURTA ===\n${res.curta}\n\n` +
           `=== DESCRIÇÃO LONGA ===\n${res.longa}\n`;
 
@@ -883,6 +982,19 @@ export default function Home() {
                         <div><span className="text-gray-500">L:</span> {res.largura}</div>
                         <div><span className="text-gray-500">A:</span> {res.altura}</div>
                         <div><span className="text-gray-500">P:</span> {res.profundidade}</div>
+                        {res.origemMedidas && (
+                          <div className={`mt-2 whitespace-normal rounded px-2 py-1 ${
+                            res.origemMedidas === 'REAPROVEITADO'
+                              ? 'bg-green-50 text-green-800'
+                              : 'bg-amber-50 text-amber-800'
+                          }`} title={res.justificativaMedidas || undefined}>
+                            {res.origemMedidas === 'REAPROVEITADO'
+                              ? `Mesmas medidas do código ${res.codigoReferencia}`
+                              : res.origemMedidas === 'COMPLEMENTADO'
+                                ? 'Ficha anterior complementada — confira'
+                                : 'Estimativa da IA — confira'}
+                          </div>
+                        )}
                       </td>
                       <td className={`p-3 max-w-xs ${falhou ? 'text-red-600' : 'text-gray-900'}`}>
                         {res.curta}
