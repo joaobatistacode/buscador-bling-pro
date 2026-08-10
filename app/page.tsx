@@ -17,13 +17,15 @@ const LADO_FOTO = 350;
 // Onde o histórico fica guardado no navegador. Sobrevive a queda de
 // energia e a fechar o navegador: só some se o usuário limpar.
 const CHAVE_HISTORICO = 'buscador-bling:resultados';
+const CHAVE_GEMINI_SESSAO = 'buscador-bling:gemini';
+const CHAVE_SERPER_SESSAO = 'buscador-bling:serper';
 
 // Cada lote vira um ZIP separado. Um ZIP único com centenas de produtos
 // fica grande demais para o navegador montar de uma vez só.
 const PADRAO_POR_ZIP = 100;
 
 const ETAPAS: EtapaFluxo[] = [
-  { numero: 1, titulo: 'Importar', descricao: 'Cole a lista e confira as credenciais.' },
+  { numero: 1, titulo: 'Importar', descricao: 'Cole a lista e confira o lote.' },
   { numero: 2, titulo: 'Processar', descricao: 'Gere imagens, descrições e ficha técnica.' },
   { numero: 3, titulo: 'Revisar', descricao: 'Confira e edite produto por produto.' },
   { numero: 4, titulo: 'Aprovar', descricao: 'Valide o lote antes de qualquer envio.' },
@@ -178,6 +180,7 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 
 export default function Home() {
   const router = useRouter();
+  const [visaoAtual, setVisaoAtual] = useState<'fluxo' | 'configuracoes'>('fluxo');
   const [etapaAtual, setEtapaAtual] = useState(1);
   const [loteAprovado, setLoteAprovado] = useState(false);
   const [textoColado, setTextoColado] = useState('');
@@ -203,21 +206,27 @@ export default function Home() {
 
   // Recupera o que já tinha sido processado numa sessão anterior.
   useEffect(() => {
+    const quadro = requestAnimationFrame(() => {
+      setApiKeyGemini(sessionStorage.getItem(CHAVE_GEMINI_SESSAO) || '');
+      setApiKeyImg(sessionStorage.getItem(CHAVE_SERPER_SESSAO) || '');
+    });
+
     try {
       const salvo = localStorage.getItem(CHAVE_HISTORICO);
-      if (!salvo) return;
-
-      const dados = JSON.parse(salvo);
-      if (Array.isArray(dados) && dados.length > 0) {
-        setResultados(dados);
-        setAviso(
-          `${dados.length} produto(s) recuperados da sessão anterior. ` +
-          `Você pode baixar o ZIP direto, sem reprocessar.`
-        );
+      if (salvo) {
+        const dados = JSON.parse(salvo);
+        if (Array.isArray(dados) && dados.length > 0) {
+          setResultados(dados);
+          setAviso(
+            `${dados.length} produto(s) recuperados da sessão anterior. ` +
+            `Você pode baixar o ZIP direto, sem reprocessar.`
+          );
+        }
       }
     } catch {
       // Histórico corrompido não deve travar a página.
     }
+    return () => cancelAnimationFrame(quadro);
   }, []);
 
   // Descobre se já existe conexão com o Bling e lê o retorno da autorização.
@@ -241,6 +250,19 @@ export default function Home() {
     await fetch('/api/bling/estado', { method: 'DELETE' });
     setBling(b => ({ ...b, conectado: false }));
     setAviso('Desconectado do Bling.');
+  };
+
+  const salvarConfiguracoes = () => {
+    sessionStorage.setItem(CHAVE_GEMINI_SESSAO, apiKeyGemini);
+    sessionStorage.setItem(CHAVE_SERPER_SESSAO, apiKeyImg);
+    setAviso('Configurações salvas nesta sessão do navegador.');
+    setVisaoAtual('fluxo');
+  };
+
+  const cancelarConfiguracoes = () => {
+    setApiKeyGemini(sessionStorage.getItem(CHAVE_GEMINI_SESSAO) || '');
+    setApiKeyImg(sessionStorage.getItem(CHAVE_SERPER_SESSAO) || '');
+    setVisaoAtual('fluxo');
   };
 
   // Percorre os produtos mandando (ou simulando) para o Bling.
@@ -696,6 +718,20 @@ export default function Home() {
             </span>
             <button
               type="button"
+              onClick={() => visaoAtual === 'configuracoes'
+                ? cancelarConfiguracoes()
+                : setVisaoAtual('configuracoes')}
+              aria-current={visaoAtual === 'configuracoes' ? 'page' : undefined}
+              className={`rounded-lg border px-3.5 py-2 text-sm font-semibold transition ${
+                visaoAtual === 'configuracoes'
+                  ? 'border-blue-600 bg-blue-50 text-blue-700'
+                  : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              ⚙ Configurações
+            </button>
+            <button
+              type="button"
               onClick={sairAplicacao}
               className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
             >
@@ -706,14 +742,16 @@ export default function Home() {
       </header>
 
       <div className="mx-auto max-w-7xl px-5 py-6 md:px-8 md:py-8">
-        <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:p-5">
-          <WorkflowStepper
-            etapas={ETAPAS}
-            atual={etapaAtual}
-            podeAcessar={podeAcessarEtapa}
-            aoSelecionar={setEtapaAtual}
-          />
-        </section>
+        {visaoAtual === 'fluxo' && (
+          <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:p-5">
+            <WorkflowStepper
+              etapas={ETAPAS}
+              atual={etapaAtual}
+              podeAcessar={podeAcessarEtapa}
+              aoSelecionar={setEtapaAtual}
+            />
+          </section>
+        )}
 
         {aviso && (
           <div role="status" className="mb-6 flex items-start justify-between gap-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -724,7 +762,121 @@ export default function Home() {
           </div>
         )}
 
-        {etapaAtual === 1 && (
+        {visaoAtual === 'configuracoes' && (
+          <section>
+            <div className="mb-6">
+              <p className="text-sm font-bold uppercase tracking-[0.18em] text-blue-600">Preferências</p>
+              <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950 md:text-3xl">Configurações</h2>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+                Centralize as chaves usadas no processamento e acompanhe a conexão com o Bling.
+              </p>
+            </div>
+
+            <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
+                <div className="mb-6 flex items-start justify-between gap-4 border-b border-slate-200 pb-5">
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-950">Chaves das APIs</h3>
+                    <p className="mt-1 text-sm text-slate-500">Necessárias para gerar textos e buscar imagens.</p>
+                  </div>
+                  <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">Nesta sessão</span>
+                </div>
+
+                <div className="space-y-5">
+                  <label className="block text-sm font-bold text-slate-800">
+                    Chave da API do Gemini
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder="Cole a chave do Gemini"
+                      value={apiKeyGemini}
+                      onChange={evento => setApiKeyGemini(evento.target.value)}
+                      className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 font-normal text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    />
+                    <span className="mt-2 flex items-center gap-2 text-xs font-normal text-slate-500">
+                      <span className={`h-2 w-2 rounded-full ${apiKeyGemini ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                      {apiKeyGemini ? 'Chave informada' : 'Ainda não informada'}
+                    </span>
+                  </label>
+
+                  <label className="block text-sm font-bold text-slate-800">
+                    Chave da API Serper
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder="Cole a chave do serper.dev"
+                      value={apiKeyImg}
+                      onChange={evento => setApiKeyImg(evento.target.value)}
+                      className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 font-normal text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    />
+                    <span className="mt-2 flex items-center gap-2 text-xs font-normal text-slate-500">
+                      <span className={`h-2 w-2 rounded-full ${apiKeyImg ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                      {apiKeyImg ? 'Chave informada' : 'Ainda não informada'}
+                    </span>
+                  </label>
+                </div>
+
+                <div className="mt-6 rounded-xl border border-blue-100 bg-blue-50 p-4 text-xs leading-5 text-blue-900">
+                  As chaves ficam somente nesta sessão do navegador. Elas não são adicionadas ao GitHub,
+                  ao histórico de produtos ou ao banco de dados.
+                </div>
+
+                <div className="mt-6 flex flex-wrap justify-end gap-3">
+                  <button type="button" onClick={cancelarConfiguracoes} className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                    Cancelar
+                  </button>
+                  <button type="button" onClick={salvarConfiguracoes} disabled={!apiKeyGemini} className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">
+                    Salvar configurações
+                  </button>
+                </div>
+              </div>
+
+              <aside className="h-fit rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Integração</p>
+                    <h3 className="mt-2 text-lg font-bold text-slate-950">Bling</h3>
+                  </div>
+                  <span className={`rounded-full px-3 py-1.5 text-xs font-bold ${
+                    bling.conectado
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-slate-100 text-slate-600'
+                  }`}>
+                    {bling.conectado ? '● Conectado' : '○ Desconectado'}
+                  </span>
+                </div>
+
+                <div className="my-5 h-px bg-slate-200" />
+
+                {!bling.configurado ? (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+                    As credenciais BLING_CLIENT_ID e BLING_CLIENT_SECRET ainda não estão configuradas na Vercel.
+                  </div>
+                ) : bling.conectado ? (
+                  <>
+                    <p className="text-sm leading-6 text-slate-600">
+                      A conta está autorizada para simular e atualizar produtos após a aprovação do lote.
+                    </p>
+                    <button type="button" onClick={desconectarBling} className="mt-5 w-full rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700 hover:bg-red-100">
+                      Desconectar do Bling
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm leading-6 text-slate-600">
+                      Conecte sua conta para liberar a simulação e o envio na última etapa.
+                    </p>
+                    <a href="/api/bling/autorizar" className="mt-5 block w-full rounded-xl bg-slate-950 px-4 py-3 text-center text-sm font-bold text-white hover:bg-slate-800">
+                      Conectar ao Bling
+                    </a>
+                  </>
+                )}
+              </aside>
+            </div>
+          </section>
+        )}
+
+        {visaoAtual === 'fluxo' && etapaAtual === 1 && (
           <section>
             <div className="mb-6">
               <p className="text-sm font-bold uppercase tracking-[0.18em] text-blue-600">Etapa 1 de 5</p>
@@ -737,33 +889,7 @@ export default function Home() {
 
             <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
-                <div className="grid gap-4 md:grid-cols-2">
-                  <label className="text-sm font-bold text-slate-800">
-                    Chave da API do Gemini
-                    <input
-                      type="password"
-                      autoComplete="off"
-                      placeholder="Cole a chave do Gemini"
-                      value={apiKeyGemini}
-                      onChange={evento => setApiKeyGemini(evento.target.value)}
-                      className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 font-normal text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                    />
-                  </label>
-                  <label className="text-sm font-bold text-slate-800">
-                    Chave da API Serper
-                    <input
-                      type="password"
-                      autoComplete="off"
-                      placeholder="Cole a chave do serper.dev"
-                      value={apiKeyImg}
-                      onChange={evento => setApiKeyImg(evento.target.value)}
-                      className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 font-normal text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                    />
-                    <span className="mt-1 block text-xs font-normal text-slate-500">Usada somente para buscar imagens.</span>
-                  </label>
-                </div>
-
-                <label className="mt-6 block text-sm font-bold text-slate-800">
+                <label className="block text-sm font-bold text-slate-800">
                   Lista de produtos
                   <textarea
                     placeholder={"16504\tENCORD UKULELE SG NAILON SOPRANO 10981\n16503\tSPEAKON FEMEA ROXTONE 4 PINOS RP-017 PRETO"}
@@ -781,10 +907,27 @@ export default function Home() {
                 <p className="mt-1 text-sm text-slate-300">produtos identificados</p>
                 <div className="my-5 h-px bg-slate-800" />
                 <ul className="space-y-3 text-sm text-slate-300">
+                  <li className="flex gap-2">
+                    <span className={apiKeyGemini ? 'text-emerald-400' : 'text-amber-300'}>{apiKeyGemini ? '✓' : '!'}</span>
+                    Gemini {apiKeyGemini ? 'configurado' : 'não configurado'}
+                  </li>
+                  <li className="flex gap-2">
+                    <span className={apiKeyImg ? 'text-emerald-400' : 'text-amber-300'}>{apiKeyImg ? '✓' : '!'}</span>
+                    Serper {apiKeyImg ? 'configurado' : 'não configurado'}
+                  </li>
                   <li className="flex gap-2"><span className="text-emerald-400">✓</span> Histórico salvo a cada produto</li>
                   <li className="flex gap-2"><span className="text-emerald-400">✓</span> Produtos prontos não são cobrados novamente</li>
                   <li className="flex gap-2"><span className="text-emerald-400">✓</span> Imagens permanecem no padrão 420×420</li>
                 </ul>
+                {!apiKeyGemini && (
+                  <button
+                    type="button"
+                    onClick={() => setVisaoAtual('configuracoes')}
+                    className="mt-5 w-full rounded-xl border border-blue-400 px-4 py-3 text-sm font-bold text-blue-200 transition hover:bg-blue-950"
+                  >
+                    Configurar chaves
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setEtapaAtual(2)}
@@ -794,7 +937,7 @@ export default function Home() {
                   Continuar para processar
                 </button>
                 {!apiKeyGemini && linhasImportadas > 0 && (
-                  <p className="mt-3 text-xs text-amber-300">Informe a chave do Gemini para continuar.</p>
+                  <p className="mt-3 text-xs text-amber-300">Configure a chave do Gemini para continuar.</p>
                 )}
               </aside>
             </div>
@@ -812,7 +955,7 @@ export default function Home() {
           </section>
         )}
 
-        {etapaAtual === 2 && (
+        {visaoAtual === 'fluxo' && etapaAtual === 2 && (
           <section>
             <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
               <div>
@@ -891,7 +1034,7 @@ export default function Home() {
           </section>
         )}
 
-        {etapaAtual === 3 && resultados.length > 0 && (
+        {visaoAtual === 'fluxo' && etapaAtual === 3 && resultados.length > 0 && (
           <section>
             <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
               <div>
@@ -952,7 +1095,7 @@ export default function Home() {
           </section>
         )}
 
-        {etapaAtual === 4 && resultados.length > 0 && (
+        {visaoAtual === 'fluxo' && etapaAtual === 4 && resultados.length > 0 && (
           <section>
             <div className="mb-6">
               <p className="text-sm font-bold uppercase tracking-[0.18em] text-blue-600">Etapa 4 de 5</p>
@@ -1013,7 +1156,7 @@ export default function Home() {
           </section>
         )}
 
-        {etapaAtual === 5 && loteAprovado && (
+        {visaoAtual === 'fluxo' && etapaAtual === 5 && loteAprovado && (
           <section>
             <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
               <div>
