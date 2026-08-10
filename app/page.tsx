@@ -18,6 +18,9 @@ const CHAVE_HISTORICO = 'buscador-bling:resultados';
 // fica grande demais para o navegador montar de uma vez só.
 const PADRAO_POR_ZIP = 100;
 
+const CAMPOS_IMAGEM = ['img1', 'img2', 'img3', 'img4'] as const;
+type CampoImagem = (typeof CAMPOS_IMAGEM)[number];
+
 // Nome de pasta/arquivo seguro em Windows, macOS e Linux.
 const nomeSeguro = (texto: string) =>
   texto.replace(/[\\/:*?"<>|]/g, '-').trim() || 'sem-codigo';
@@ -220,6 +223,41 @@ export default function Home() {
     setResultados([]);
     setAviso('');
     setLog('Histórico apagado.');
+  };
+
+  const alterarSelecaoImagem = (
+    indiceProduto: number,
+    campo: CampoImagem,
+    selecionar: boolean
+  ) => {
+    const proximos = resultados.map((produto, indice) => {
+      if (indice !== indiceProduto) return produto;
+
+      const excluidas = { ...(produto.imagensExcluidas || {}) };
+
+      if (selecionar) {
+        const urlOriginal = excluidas[campo];
+        if (!urlOriginal) return produto;
+
+        delete excluidas[campo];
+        return { ...produto, [campo]: urlOriginal, imagensExcluidas: excluidas };
+      }
+
+      const urlAtual = produto[campo];
+      if (!urlAtual) return produto;
+
+      excluidas[campo] = urlAtual;
+      return { ...produto, [campo]: '', imagensExcluidas: excluidas };
+    });
+
+    setResultados(proximos);
+    salvarHistorico(proximos);
+    setEnvios([]);
+    setAviso(
+      selecionar
+        ? 'Imagem restaurada. Faça uma nova simulação antes de enviar.'
+        : 'Imagem removida do envio. Ela pode ser restaurada antes de enviar.'
+    );
   };
 
   const iniciarProcessamento = async () => {
@@ -757,6 +795,10 @@ export default function Home() {
 
       {resultados.length > 0 && (
         <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 bg-blue-50 border-b border-blue-100 text-sm text-blue-900">
+            Use <strong>×</strong> para não enviar uma imagem. Se mudar de ideia, use{' '}
+            <strong>↶ restaurar</strong>. A imagem original não é apagada.
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-sm">
               <thead>
@@ -778,25 +820,61 @@ export default function Home() {
                       <td className="p-3 text-gray-900 min-w-[180px]">{res.nome}</td>
                       <td className="p-3">
                         <div className="grid grid-cols-2 gap-1.5 w-[150px]">
-                          {[res.img1, res.img2, res.img3, res.img4].map((img, i) =>
-                            img ? (
-                              <a key={i} href={img} target="_blank" rel="noreferrer">
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img
-                                  src={img}
-                                  alt={`${res.nome} ${i + 1}`}
-                                  className="w-[70px] h-[70px] object-cover rounded border border-gray-200 hover:border-blue-500 transition-colors"
-                                />
-                              </a>
-                            ) : (
+                          {CAMPOS_IMAGEM.map((campo, i) => {
+                            const img = res[campo];
+                            const removida = res.imagensExcluidas?.[campo];
+
+                            if (img) {
+                              return (
+                                <div key={campo} className="relative w-[70px] h-[70px]">
+                                  <a href={img} target="_blank" rel="noreferrer">
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                                    <img
+                                      src={img}
+                                      alt={`${res.nome} ${i + 1}`}
+                                      className="w-[70px] h-[70px] object-cover rounded border border-gray-200 hover:border-blue-500 transition-colors"
+                                    />
+                                  </a>
+                                  <button
+                                    type="button"
+                                    onClick={() => alterarSelecaoImagem(index, campo, false)}
+                                    disabled={ocupado}
+                                    aria-label={`Remover imagem ${i + 1} de ${res.nome} do envio`}
+                                    title="Não enviar esta imagem"
+                                    className="absolute -right-1.5 -top-1.5 w-6 h-6 rounded-full bg-red-600 hover:bg-red-700 text-white font-bold leading-none shadow disabled:opacity-50"
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              );
+                            }
+
+                            if (removida) {
+                              return (
+                                <button
+                                  key={campo}
+                                  type="button"
+                                  onClick={() => alterarSelecaoImagem(index, campo, true)}
+                                  disabled={ocupado}
+                                  aria-label={`Restaurar imagem ${i + 1} de ${res.nome}`}
+                                  title="Restaurar esta imagem"
+                                  className="w-[70px] h-[70px] flex flex-col items-center justify-center text-red-700 text-xs bg-red-50 border border-dashed border-red-300 rounded hover:bg-red-100 disabled:opacity-50"
+                                >
+                                  <span className="text-lg leading-none" aria-hidden="true">↶</span>
+                                  restaurar
+                                </button>
+                              );
+                            }
+
+                            return (
                               <div
-                                key={i}
+                                key={campo}
                                 className="w-[70px] h-[70px] flex items-center justify-center text-gray-400 text-xs bg-gray-50 border border-dashed border-gray-300 rounded"
                               >
                                 vazio
                               </div>
-                            )
-                          )}
+                            );
+                          })}
                         </div>
                       </td>
                       <td className="p-3 text-xs text-gray-700 whitespace-nowrap">
