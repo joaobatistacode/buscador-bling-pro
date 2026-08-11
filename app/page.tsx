@@ -1460,6 +1460,18 @@ export default function Home() {
                       {envio.alterados && envio.alterados.length > 0 && <p className="mt-2 text-xs text-slate-700">Alterar: {envio.alterados.join(', ')}</p>}
                       {envio.ignorados && envio.ignorados.length > 0 && <p className="mt-2 text-xs text-amber-700">Não alterado: {envio.ignorados.join('; ')}</p>}
                       {envio.avisosBling && envio.avisosBling.length > 0 && <p className="mt-2 text-xs text-amber-700">Bling: {envio.avisosBling.join('; ')}</p>}
+                      {envio.simulado && typeof envio.corpo?.descricaoComplementar === 'string' && (
+                        <details className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3" open>
+                          <summary className="cursor-pointer text-xs font-bold text-emerald-800">
+                            Prévia formatada da descrição no Bling
+                          </summary>
+                          <div
+                            className="mt-3 rounded-lg bg-white p-4 text-sm leading-6 text-slate-800 [&_p]:mb-3 [&_p:last-child]:mb-0 [&_ul]:ml-5 [&_ul]:list-disc [&_ul]:space-y-1"
+                            // A API devolve somente HTML escapado e tags simples criadas no servidor.
+                            dangerouslySetInnerHTML={{ __html: envio.corpo.descricaoComplementar }}
+                          />
+                        </details>
+                      )}
                       {envio.corpo && (
                         <details className="mt-3">
                           <summary className="cursor-pointer text-xs font-semibold text-blue-600">Ver dados da simulação</summary>
