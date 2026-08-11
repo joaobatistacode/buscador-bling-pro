@@ -36,6 +36,32 @@ const semInformacao = (texto: any) => {
   return !t || t.toUpperCase().includes('NÃO INFORMADO') || t.startsWith('Erro IA:');
 };
 
+const linkDaImagem = (imagem: any): string => {
+  if (typeof imagem === 'string') return imagem.trim();
+  if (!imagem || typeof imagem !== 'object') return '';
+  return String(
+    imagem.link ?? imagem.url ?? imagem.linkOriginal ?? imagem.urlOriginal ??
+    imagem.imagemURL ?? imagem.urlImagem ?? imagem.linkMiniatura ?? ''
+  ).trim();
+};
+
+// O PUT substitui o produto. Se o Bling já tem mídia, cada imagem precisa ser
+// convertida novamente para o campo gravável `imagensURL`; caso contrário o
+// produto é bloqueado antes do envio para nunca apagar fotos silenciosamente.
+function imagensAtuaisDoBling(produto: any) {
+  const midia = produto?.midia?.imagens;
+  const lista = [midia?.externas, midia?.internas, midia?.imagensURL]
+    .find(valor => Array.isArray(valor) && valor.length > 0) as any[] | undefined;
+  if (!lista) return { temImagens: false, links: [] as string[], incompleta: false };
+
+  const extraidos = lista.map(linkDaImagem);
+  return {
+    temImagens: true,
+    links: [...new Set(extraidos.filter(Boolean))],
+    incompleta: extraidos.some(link => !link),
+  };
+}
+
 // "250 g" -> 0.25 | "1,5 kg" -> 1.5 | "2kg" -> 2 | texto solto -> null
 function paraQuilos(texto: any): number | null {
   if (semInformacao(texto)) return null;
@@ -285,21 +311,41 @@ export async function POST(request: Request) {
     }
   }
 
-  // Imagens: o Bling só aceita link, então aqui já chegam as URLs do Supabase.
+  // Imagens: todo PUT deve preservar a mídia atual ou substituí-la de forma
+  // explícita. Nunca enviamos um produto com imagens sem reenviar seus links.
   const links = (imagens as string[]).filter(Boolean);
-  if (links.length > 0) {
-    const jaTem = atual.midia?.imagens?.externas?.length > 0;
-    if (sobrescrever || !jaTem) {
-      corpo.midia = {
-        ...(atual.midia || {}),
-        // `externas` e `internas` são campos somente de leitura. O Bling
-        // recebe novas imagens pelo campo de escrita `imagensURL`.
-        imagens: { imagensURL: links.map((link) => ({ link })) },
-      };
-      alterados.push(`${links.length} imagem(ns)`);
-    } else {
-      ignorados.push('imagens (o produto já tem imagens no Bling)');
+  const imagensAtuais = imagensAtuaisDoBling(atual);
+
+  if (imagensAtuais.temImagens && (imagensAtuais.incompleta || imagensAtuais.links.length === 0)) {
+    return Response.json(
+      {
+        codigo,
+        idProduto,
+        enviado: false,
+        alterados,
+        ignorados,
+        erro: 'Envio bloqueado: o produto possui imagem no Bling, mas não foi possível obter todos os links para preservá-la.',
+      },
+      { status: 409 }
+    );
+  }
+
+  let linksParaEnviar: string[] = [];
+  if (links.length > 0 && (sobrescrever || !imagensAtuais.temImagens)) {
+    linksParaEnviar = links;
+    alterados.push(`${links.length} imagem(ns)`);
+  } else if (imagensAtuais.temImagens) {
+    linksParaEnviar = imagensAtuais.links;
+    ignorados.push('imagens atuais preservadas no Bling');
+    if (sobrescrever && links.length === 0) {
+      avisos.push('As novas imagens falharam; as imagens anteriores foram mantidas.');
     }
+  }
+
+  if (linksParaEnviar.length > 0) {
+    corpo.midia = {
+      imagens: { imagensURL: linksParaEnviar.map((link) => ({ link })) },
+    };
   }
 
   if (alterados.length === 0) {
