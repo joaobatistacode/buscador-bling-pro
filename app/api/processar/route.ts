@@ -85,10 +85,10 @@ const prepararSitesPreferenciais = (valor: unknown): string[] => {
     .map(item => String(item).trim().toLowerCase())
     .map(site => site.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0])
     .filter(site => /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/i.test(site))
-  )].slice(0, 6);
+  )].slice(0, 12);
 };
 
-const montarTermosImagem = (nome: string, sites: string[]): string[] => {
+const montarTermosImagem = (nome: string, sites: string[], limite: number): string[] => {
   const busca = normalizarBuscaImagem(nome);
   const palavras = busca.split(' ').filter(Boolean);
   const genericas = new Set([
@@ -100,12 +100,13 @@ const montarTermosImagem = (nome: string, sites: string[]): string[] => {
   );
   const termoPrincipal = distintivas.length >= 2 ? distintivas.join(' ') : busca;
 
-  return [...new Set([
-    ...sites.map(site => `${termoPrincipal} site:${site}`),
-    termoPrincipal,
-    busca,
-    palavras.slice(-5).join(' '),
-  ].map(termo => termo.trim()).filter(Boolean))];
+  const genericos = [termoPrincipal, busca, palavras.slice(-5).join(' ')];
+  const consultasDeSites = sites.map(site => `${termoPrincipal} site:${site}`);
+  const consultas = sites.length > 0 && limite > 1
+    ? [...consultasDeSites.slice(0, limite - 1), ...genericos]
+    : [...consultasDeSites, ...genericos];
+
+  return [...new Set(consultas.map(termo => termo.trim()).filter(Boolean))].slice(0, limite);
 };
 
 export interface Ficha {
@@ -327,6 +328,13 @@ export async function POST(request: Request) {
   try {
     const body = JSON.parse(new TextDecoder().decode(corpo));
     const { nome, apiKey, apiKeyImg, buscarImagens = true } = body;
+    const somenteImagens = body.somenteImagens === true;
+    const limiteConsultasImagens = Math.min(12, Math.max(
+      1,
+      Number.isFinite(Number(body.limiteConsultasImagens))
+        ? Math.trunc(Number(body.limiteConsultasImagens))
+        : 3
+    ));
     const referencias: ReferenciaMedidas[] = Array.isArray(body.referencias)
       ? body.referencias.slice(0, 6).map((item: unknown) => {
           const dados = item && typeof item === 'object'
@@ -344,9 +352,14 @@ export async function POST(request: Request) {
       : [];
 
     // --- BUSCA DE IMAGENS ---
-    const imagensEncontradas = ["", "", "", ""];
+    const limiteResultados = somenteImagens ? 10 : 4;
+    const imagensEncontradas: string[] = [];
     const sitesPreferenciais = prepararSitesPreferenciais(body.sitesPreferenciais);
-    const tentativas = montarTermosImagem(String(nome || ''), sitesPreferenciais);
+    const tentativas = montarTermosImagem(
+      String(nome || ''),
+      sitesPreferenciais,
+      limiteConsultasImagens
+    );
     const debugImg: any[] = [];
 
     if (buscarImagens === false) {
@@ -357,15 +370,18 @@ export async function POST(request: Request) {
         const urls = await buscarImagensSerper(tentativa, apiKeyImg.trim(), debugImg);
         for (const url of urls) {
           if (!imagensEncontradas.includes(url)) {
-            const vaga = imagensEncontradas.findIndex(item => !item);
-            if (vaga === -1) break;
-            imagensEncontradas[vaga] = url;
+            imagensEncontradas.push(url);
+            if (imagensEncontradas.length >= limiteResultados) break;
           }
         }
-        if (imagensEncontradas.every(Boolean)) break;
+        if (imagensEncontradas.length >= limiteResultados) break;
       }
     } else {
       debugImg.push({ erro: "Chave da API Serper não foi preenchida no site." });
+    }
+
+    if (somenteImagens) {
+      return NextResponse.json({ imagens: imagensEncontradas, debugImg });
     }
 
     // --- DESCRIÇÕES E FICHA (GEMINI) ---

@@ -19,5 +19,6 @@ export interface ProdutoResultado {
   img2?: string;
   img3?: string;
   img4?: string;
+  imagensSugeridas?: string[];
   imagensExcluidas?: Partial<Record<CampoImagem, string>>;
 }
