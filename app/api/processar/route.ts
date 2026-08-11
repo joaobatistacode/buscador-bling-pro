@@ -195,7 +195,10 @@ Produto: '${nome}'
 
 Preencha os campos abaixo.
 
-curta: descrição curta e atrativa, no máximo 2 linhas.
+curta: uma única frase comercial, natural e convincente, com no máximo 130
+caracteres. Inclua o tipo do produto, a marca/modelo quando identificáveis e o
+principal benefício real. Não use HTML, quebra de linha, lista, slogan genérico
+ou informação que não esteja clara no nome do produto.
 
 longa: descrição em TEXTO PURO, pronta para copiar e colar.
 - NÃO use HTML nem markdown. Nada de <p>, <b>, <ul>, **, ##.
@@ -327,8 +330,14 @@ export async function POST(request: Request) {
   }
   try {
     const body = JSON.parse(new TextDecoder().decode(corpo));
-    const { nome, apiKey, apiKeyImg, buscarImagens = true } = body;
+    const { nome, apiKey, apiKeyImg } = body;
     const somenteImagens = body.somenteImagens === true;
+    const preservarImagensExistentes = body.preservarImagensExistentes === true;
+    // Busca automática exige autorização explícita. A busca manual usa
+    // `somenteImagens` e continua disponível para uma decisão consciente.
+    const buscarImagens = somenteImagens || (
+      body.buscarImagens === true && !preservarImagensExistentes
+    );
     const limiteConsultasImagens = Math.min(12, Math.max(
       1,
       Number.isFinite(Number(body.limiteConsultasImagens))
@@ -362,8 +371,11 @@ export async function POST(request: Request) {
     );
     const debugImg: any[] = [];
 
-    if (buscarImagens === false) {
-      debugImg.push({ info: "Busca de imagens preservada do histórico anterior." });
+    if (!buscarImagens) {
+      debugImg.push({ info: preservarImagensExistentes
+        ? "Produto já tinha imagem: URLs preservadas e Serper não consultado."
+        : "Busca de imagens não autorizada nesta requisição."
+      });
     } else if (apiKeyImg) {
       for (const tentativa of tentativas) {
         if (!tentativa.trim()) continue;

@@ -1,6 +1,5 @@
 import { BLING_API, tokenValido } from '../sessao';
 import { lerCorpoLimitado, naoAutorizado, origemInvalida, origemPermitida, temAcesso } from '@/lib/acesso';
-import { formatarDescricaoComplementarBling } from '@/lib/descricao-bling';
 
 // Campos que o PUT de produto aceita. O PUT do Bling substitui o produto
 // inteiro, então precisamos reenviar o que já existe — mas só o que ele
@@ -14,7 +13,20 @@ const CAMPOS_COPIAVEIS = [
 ] as const;
 
 // O Bling limita a descrição curta; cortar aqui evita perder a requisição toda.
-const LIMITE_DESCRICAO_CURTA = 255;
+const LIMITE_DESCRICAO_CURTA = 136;
+const DESCRICAO_COMPLEMENTAR_PADRAO = 'SEM OBS';
+
+const limitarDescricaoCurta = (valor: unknown) => {
+  const texto = String(valor ?? '').replace(/\s+/g, ' ').trim();
+  if (texto.length <= LIMITE_DESCRICAO_CURTA) return texto;
+
+  const comEspacoParaReticencias = texto.slice(0, LIMITE_DESCRICAO_CURTA - 1);
+  const ultimoEspaco = comEspacoParaReticencias.lastIndexOf(' ');
+  const base = ultimoEspaco >= 100
+    ? comEspacoParaReticencias.slice(0, ultimoEspaco)
+    : comEspacoParaReticencias;
+  return `${base.replace(/[,:;\-]+$/, '')}…`;
+};
 
 const vazio = (valor: any) =>
   valor === null || valor === undefined || valor === '' || valor === 0;
@@ -129,9 +141,10 @@ export async function POST(request: Request) {
     return Response.json({ erro: 'JSON inválido.' }, { status: 400 });
   }
   const {
-    codigo, curta, longa, marca, peso, largura, altura, profundidade,
+    codigo, curta, marca, peso, largura, altura, profundidade,
     imagens = [], simular = true, sobrescrever = false, unidadeMedida,
   } = dados;
+  const somenteDescricaoComplementar = dados.somenteDescricaoComplementar === true;
 
   if (!codigo) {
     return Response.json({ erro: 'Faltou o código do produto.' }, { status: 400 });
@@ -146,7 +159,7 @@ export async function POST(request: Request) {
   if (!busca.ok) {
     return Response.json(
       { erro: `Não deu para buscar o produto: ${descreveErro(busca.corpo, busca.status)}` },
-      { status: 502 }
+      { status: somenteDescricaoComplementar && busca.status === 429 ? 429 : 502 }
     );
   }
 
@@ -173,7 +186,7 @@ export async function POST(request: Request) {
   if (!leitura.ok) {
     return Response.json(
       { erro: `Não deu para ler o produto ${codigo}: ${descreveErro(leitura.corpo, leitura.status)}` },
-      { status: 502 }
+      { status: somenteDescricaoComplementar && leitura.status === 429 ? 429 : 502 }
     );
   }
 
@@ -192,21 +205,64 @@ export async function POST(request: Request) {
   if (atual.categoria?.id) corpo.categoria = { id: atual.categoria.id };
   if (atual.linhaProduto?.id) corpo.linhaProduto = { id: atual.linhaProduto.id };
 
+  // Manutenção rápida para produtos já enviados: preserva todo o cadastro e
+  // troca somente o texto que aparece nos pedidos da loja física.
+  if (somenteDescricaoComplementar) {
+    const descricaoAtual = String(atual.descricaoComplementar ?? '').trim();
+    if (simular) {
+      return Response.json({
+        codigo,
+        idProduto,
+        simulado: true,
+        descricaoAtual,
+        descricaoNova: DESCRICAO_COMPLEMENTAR_PADRAO,
+      });
+    }
+
+    if (descricaoAtual === DESCRICAO_COMPLEMENTAR_PADRAO) {
+      return Response.json({
+        codigo,
+        idProduto,
+        enviado: false,
+        jaCorrigido: true,
+        alterados: [],
+      });
+    }
+
+    corpo.descricaoComplementar = DESCRICAO_COMPLEMENTAR_PADRAO;
+    const correcao = await chamarBling(`/produtos/${idProduto}`, token, {
+      method: 'PUT',
+      body: JSON.stringify(corpo),
+    });
+
+    if (!correcao.ok) {
+      return Response.json(
+        { codigo, idProduto, erro: descreveErro(correcao.corpo, correcao.status) },
+        { status: correcao.status === 429 ? 429 : 502 }
+      );
+    }
+
+    return Response.json({
+      codigo,
+      idProduto,
+      enviado: true,
+      alterados: ['descricaoComplementar'],
+      avisosBling: correcao.corpo?.data?.warnings || [],
+    });
+  }
+
   const alterados: string[] = [];
   const ignorados: string[] = [];
   const avisos: string[] = [];
 
-  // Descrições: é o objetivo do app, então sempre entram.
+  // A curta alimenta a loja virtual. A complementar aparece nos pedidos da
+  // loja física, por isso deve ser neutra e nunca receber o texto comercial.
   if (!semInformacao(curta)) {
-    corpo.descricaoCurta = String(curta).slice(0, LIMITE_DESCRICAO_CURTA);
+    corpo.descricaoCurta = limitarDescricaoCurta(curta);
     alterados.push('descricaoCurta');
   }
-  if (!semInformacao(longa)) {
-    corpo.descricaoComplementar = formatarDescricaoComplementarBling(longa);
-    alterados.push('descricaoComplementar');
-  } else {
-    avisos.push('A descrição complementar não foi enviada porque a descrição longa chegou vazia.');
-  }
+  corpo.descricaoComplementar = DESCRICAO_COMPLEMENTAR_PADRAO;
+  alterados.push('descricaoComplementar');
 
   // Ficha: por padrão só preenche o que está vazio no Bling, para não
   // apagar dado que você já conferiu na mão.
