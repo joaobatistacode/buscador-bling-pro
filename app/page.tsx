@@ -846,8 +846,9 @@ export default function Home() {
               onClick={() => visaoAtual === 'configuracoes'
                 ? cancelarConfiguracoes()
                 : setVisaoAtual('configuracoes')}
+              disabled={ocupado}
               aria-current={visaoAtual === 'configuracoes' ? 'page' : undefined}
-              className={`rounded-lg border px-3.5 py-2 text-sm font-semibold transition ${
+              className={`rounded-lg border px-3.5 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${
                 visaoAtual === 'configuracoes'
                   ? 'border-blue-600 bg-blue-50 text-blue-700'
                   : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
@@ -858,7 +859,8 @@ export default function Home() {
             <button
               type="button"
               onClick={sairAplicacao}
-              className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              disabled={ocupado}
+              className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Sair
             </button>
@@ -976,10 +978,10 @@ export default function Home() {
                 </div>
 
                 <div className="mt-6 flex flex-wrap justify-end gap-3">
-                  <button type="button" onClick={cancelarConfiguracoes} className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">
+                  <button type="button" onClick={cancelarConfiguracoes} disabled={ocupado} className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">
                     Cancelar
                   </button>
-                  <button type="button" onClick={salvarConfiguracoes} disabled={!apiKeyGemini} className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">
+                  <button type="button" onClick={salvarConfiguracoes} disabled={!apiKeyGemini || ocupado} className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40">
                     Salvar configurações
                   </button>
                 </div>
@@ -1011,7 +1013,7 @@ export default function Home() {
                     <p className="text-sm leading-6 text-slate-600">
                       A conta está autorizada para simular e atualizar produtos após a aprovação do lote.
                     </p>
-                    <button type="button" onClick={desconectarBling} className="mt-5 w-full rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700 hover:bg-red-100">
+                    <button type="button" onClick={desconectarBling} disabled={ocupado} className="mt-5 w-full rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40">
                       Desconectar do Bling
                     </button>
                   </>
@@ -1027,6 +1029,13 @@ export default function Home() {
                 )}
               </aside>
             </div>
+
+            {bling.conectado && (
+              <BlingDescriptionMaintenance
+                bloqueado={processando || buscandoImagens || baixando || enviandoBling}
+                aoMudarOcupado={setCorrigindoDescricaoBling}
+              />
+            )}
           </section>
         )}
 
@@ -1434,13 +1443,6 @@ export default function Home() {
                     )}
                   </div>
                 </>
-              )}
-
-              {bling.conectado && (
-                <BlingDescriptionMaintenance
-                  bloqueado={processando || buscandoImagens || baixando || enviandoBling}
-                  aoMudarOcupado={setCorrigindoDescricaoBling}
-                />
               )}
 
               <div aria-live="polite" className="mt-6 min-h-16 rounded-xl bg-slate-950 p-4 font-mono text-sm leading-6 text-emerald-300">
