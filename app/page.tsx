@@ -203,6 +203,8 @@ export default function Home() {
 
   // Integração com o Bling
   const [bling, setBling] = useState({ conectado: false, configurado: false });
+  const [telegram, setTelegram] = useState({ configurado: false });
+  const [testandoTelegram, setTestandoTelegram] = useState(false);
   const [enviandoBling, setEnviandoBling] = useState(false);
   const [sobrescrever, setSobrescrever] = useState(false);
   const [unidadeMedida, setUnidadeMedida] = useState(1);
@@ -247,6 +249,11 @@ export default function Home() {
       .then(setBling)
       .catch(() => {});
 
+    fetch('/api/notificacao/telegram')
+      .then(r => r.json())
+      .then(dados => setTelegram({ configurado: dados.configurado === true }))
+      .catch(() => {});
+
     const situacao = new URLSearchParams(window.location.search).get('bling');
     if (situacao === 'conectado') {
       setAviso('Conectado ao Bling.');
@@ -261,6 +268,25 @@ export default function Home() {
     await fetch('/api/bling/estado', { method: 'DELETE' });
     setBling(b => ({ ...b, conectado: false }));
     setAviso('Desconectado do Bling.');
+  };
+
+  const testarTelegram = async () => {
+    setTestandoTelegram(true);
+    try {
+      const resposta = await fetch('/api/notificacao/telegram', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tipo: 'teste' }),
+      });
+      const dados = await resposta.json().catch(() => ({}));
+      setAviso(resposta.ok
+        ? 'Notificação de teste enviada. Confira o Telegram no celular.'
+        : `Não foi possível testar o Telegram — ${dados.erro || `HTTP ${resposta.status}`}`);
+    } catch (erro) {
+      setAviso(`Não foi possível testar o Telegram — ${erro instanceof Error ? erro.message : 'falha de rede'}`);
+    } finally {
+      setTestandoTelegram(false);
+    }
   };
 
   const salvarConfiguracoes = () => {
@@ -500,6 +526,7 @@ export default function Home() {
     const linhas = textoColado.trim().split('\n');
     if (linhas.length === 0 || linhas[0] === "") return;
 
+    const inicioProcessamento = Date.now();
     setProcessando(true);
     setAviso('');
     pararRef.current = false;
@@ -639,8 +666,6 @@ export default function Home() {
       if (i < linhas.length - 1) await espera(1500);
     }
 
-    setProcessando(false);
-
     const lista = [...porCodigo.values()];
     const comErro = lista.filter(deuErro).length;
     const semImagem = lista.filter(r => !r.img1).length;
@@ -652,6 +677,32 @@ export default function Home() {
         `. ${comErro} com falha na descrição, ${semImagem} sem imagem.`
       );
     }
+
+    if (!cotaAcabou && !pararRef.current && telegram.configurado) {
+      try {
+        const respostaNotificacao = await fetch('/api/notificacao/telegram', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tipo: 'processamento_concluido',
+            total: lista.length,
+            prontos: lista.length - comErro,
+            erros: comErro,
+            semImagem,
+            pulados,
+            duracaoSegundos: Math.round((Date.now() - inicioProcessamento) / 1000),
+          }),
+        });
+        if (!respostaNotificacao.ok) {
+          const falha = await respostaNotificacao.json().catch(() => ({}));
+          setAviso(`Produtos prontos, mas a notificação falhou — ${falha.erro || `HTTP ${respostaNotificacao.status}`}`);
+        }
+      } catch (erro) {
+        setAviso(`Produtos prontos, mas a notificação falhou — ${erro instanceof Error ? erro.message : 'falha de rede'}`);
+      }
+    }
+
+    setProcessando(false);
     if (lista.length > 0) {
       setLoteAprovado(false);
       setEtapaAtual(3);
@@ -985,7 +1036,8 @@ export default function Home() {
                 </div>
               </div>
 
-              <aside className="h-fit rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <aside className="h-fit space-y-6">
+                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Integração</p>
@@ -1025,6 +1077,38 @@ export default function Home() {
                     </a>
                   </>
                 )}
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Notificações</p>
+                      <h3 className="mt-2 text-lg font-bold text-slate-950">Telegram</h3>
+                    </div>
+                    <span className={`rounded-full px-3 py-1.5 text-xs font-bold ${
+                      telegram.configurado
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      {telegram.configurado ? '● Configurado' : '○ Não configurado'}
+                    </span>
+                  </div>
+                  <div className="my-5 h-px bg-slate-200" />
+                  {telegram.configurado ? (
+                    <>
+                      <p className="text-sm leading-6 text-slate-600">
+                        O celular será avisado quando um lote terminar normalmente e estiver pronto para revisão.
+                      </p>
+                      <button type="button" onClick={testarTelegram} disabled={ocupado || testandoTelegram} className="mt-5 w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-bold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-40">
+                        {testandoTelegram ? 'Enviando teste…' : 'Enviar notificação de teste'}
+                      </button>
+                    </>
+                  ) : (
+                    <p className="text-sm leading-6 text-slate-600">
+                      Cadastre <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs">TELEGRAM_BOT_TOKEN</code> e <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs">TELEGRAM_CHAT_ID</code> na Vercel para ativar.
+                    </p>
+                  )}
+                </div>
               </aside>
             </div>
 
