@@ -1,5 +1,6 @@
 import { BLING_API, tokenValido } from '../sessao';
 import { lerCorpoLimitado, naoAutorizado, origemInvalida, origemPermitida, temAcesso } from '@/lib/acesso';
+import { formatarDescricaoComplementarBling } from '@/lib/descricao-bling';
 
 // Campos que o PUT de produto aceita. O PUT do Bling substitui o produto
 // inteiro, então precisamos reenviar o que já existe — mas só o que ele
@@ -201,7 +202,7 @@ export async function POST(request: Request) {
     alterados.push('descricaoCurta');
   }
   if (!semInformacao(longa)) {
-    corpo.descricaoComplementar = String(longa);
+    corpo.descricaoComplementar = formatarDescricaoComplementarBling(longa);
     alterados.push('descricaoComplementar');
   } else {
     avisos.push('A descrição complementar não foi enviada porque a descrição longa chegou vazia.');
