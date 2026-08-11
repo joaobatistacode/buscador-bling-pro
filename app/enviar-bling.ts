@@ -92,7 +92,6 @@ export async function enviarProduto(
       body: JSON.stringify({
         codigo: produto.codigo,
         curta: produto.curta,
-        longa: produto.longa,
         marca: produto.marca,
         peso: produto.peso,
         largura: produto.largura,

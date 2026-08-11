@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { montarZip, type ArquivoZip } from './zip';
 import { enviarProduto, type ResultadoEnvio } from './enviar-bling';
 import { ProductReview } from './components/product-review';
+import { BlingDescriptionMaintenance } from './components/bling-description-maintenance';
 import { WorkflowStepper, type EtapaFluxo } from './components/workflow-stepper';
 import { type CampoImagem, type ProdutoResultado } from './produtos';
 
@@ -204,6 +205,7 @@ export default function Home() {
   // Integração com o Bling
   const [bling, setBling] = useState({ conectado: false, configurado: false });
   const [enviandoBling, setEnviandoBling] = useState(false);
+  const [corrigindoDescricaoBling, setCorrigindoDescricaoBling] = useState(false);
   const [sobrescrever, setSobrescrever] = useState(false);
   const [unidadeMedida, setUnidadeMedida] = useState(1);
   const [envios, setEnvios] = useState<ResultadoEnvio[]>([]);
@@ -523,7 +525,10 @@ export default function Home() {
       // Produtos completos são pulados. Os antigos que vieram sem peso,
       // medidas ou foto voltam ao processamento e preservam o que já está pronto.
       const anterior = porCodigo.get(codigo);
-      if (anterior && !deuErro(anterior) && temMedidasCompletas(anterior) && anterior.img1) {
+      const temImagemAnterior = Boolean(anterior && [
+        anterior.img1, anterior.img2, anterior.img3, anterior.img4,
+      ].some(Boolean));
+      if (anterior && !deuErro(anterior) && temMedidasCompletas(anterior) && temImagemAnterior) {
         pulados++;
         setProgresso({ atual: i + 1, total: linhas.length });
         continue;
@@ -555,8 +560,9 @@ export default function Home() {
                 .filter(Boolean),
               limiteConsultasImagens,
               referencias,
-              // Repete a busca somente quando o produto ainda está sem foto.
-              buscarImagens: !anterior?.img1,
+              // Qualquer imagem anterior bloqueia a busca automática e fica preservada.
+              preservarImagensExistentes: temImagemAnterior,
+              buscarImagens: !temImagemAnterior,
             })
           });
           dados = await res.json();
@@ -786,7 +792,7 @@ export default function Home() {
     );
   };
 
-  const ocupado = processando || buscandoImagens || baixando || enviandoBling;
+  const ocupado = processando || buscandoImagens || baixando || enviandoBling || corrigindoDescricaoBling;
 
   const sairAplicacao = async () => {
     await fetch('/api/acesso/sair', { method: 'POST' }).catch(() => null);
@@ -1430,6 +1436,13 @@ export default function Home() {
                 </>
               )}
 
+              {bling.conectado && (
+                <BlingDescriptionMaintenance
+                  bloqueado={processando || buscandoImagens || baixando || enviandoBling}
+                  aoMudarOcupado={setCorrigindoDescricaoBling}
+                />
+              )}
+
               <div aria-live="polite" className="mt-6 min-h-16 rounded-xl bg-slate-950 p-4 font-mono text-sm leading-6 text-emerald-300">
                 {log || 'Aguardando a simulação do primeiro produto.'}
               </div>
@@ -1461,16 +1474,10 @@ export default function Home() {
                       {envio.ignorados && envio.ignorados.length > 0 && <p className="mt-2 text-xs text-amber-700">Não alterado: {envio.ignorados.join('; ')}</p>}
                       {envio.avisosBling && envio.avisosBling.length > 0 && <p className="mt-2 text-xs text-amber-700">Bling: {envio.avisosBling.join('; ')}</p>}
                       {envio.simulado && typeof envio.corpo?.descricaoComplementar === 'string' && (
-                        <details className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3" open>
-                          <summary className="cursor-pointer text-xs font-bold text-emerald-800">
-                            Prévia formatada da descrição no Bling
-                          </summary>
-                          <div
-                            className="mt-3 rounded-lg bg-white p-4 text-sm leading-6 text-slate-800 [&_p]:mb-3 [&_p:last-child]:mb-0 [&_ul]:ml-5 [&_ul]:list-disc [&_ul]:space-y-1"
-                            // A API devolve somente HTML escapado e tags simples criadas no servidor.
-                            dangerouslySetInnerHTML={{ __html: envio.corpo.descricaoComplementar }}
-                          />
-                        </details>
+                        <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+                          <strong>Descrição complementar no Bling:</strong>{' '}
+                          {envio.corpo.descricaoComplementar}
+                        </div>
                       )}
                       {envio.corpo && (
                         <details className="mt-3">

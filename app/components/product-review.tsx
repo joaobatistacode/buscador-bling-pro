@@ -389,12 +389,19 @@ export function ProductReview({
               value={produto.curta || ''}
               onChange={evento => aoAlterar(indiceSelecionado, 'curta', evento.target.value)}
               disabled={ocupado}
+              maxLength={136}
               rows={5}
               className="mt-2 w-full resize-y rounded-xl border border-slate-300 bg-white p-3 text-sm font-normal leading-6 text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100"
             />
+            <span className={`mt-1 flex justify-between gap-3 text-xs font-normal normal-case tracking-normal ${
+              (produto.curta || '').length > 136 ? 'text-red-600' : 'text-slate-500'
+            }`}>
+              <span>Texto comercial exibido na loja virtual</span>
+              <span>{(produto.curta || '').length}/136</span>
+            </span>
           </label>
           <label className="text-sm font-bold text-slate-900">
-            Descrição longa
+            Descrição longa — não enviada ao Bling
             <textarea
               value={produto.longa || ''}
               onChange={evento => aoAlterar(indiceSelecionado, 'longa', evento.target.value)}
@@ -402,6 +409,9 @@ export function ProductReview({
               rows={10}
               className="mt-2 w-full resize-y rounded-xl border border-slate-300 bg-white p-3 text-sm font-normal leading-6 text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100"
             />
+            <span className="mt-1 block text-xs font-normal normal-case tracking-normal text-slate-500">
+              Mantida apenas no sistema, CSV e arquivos. A descrição complementar do Bling receberá “SEM OBS”.
+            </span>
           </label>
         </div>
       </div>
