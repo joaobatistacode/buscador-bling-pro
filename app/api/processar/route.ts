@@ -195,10 +195,11 @@ Produto: '${nome}'
 
 Preencha os campos abaixo.
 
-curta: uma única frase comercial, natural e convincente, com no máximo 130
-caracteres. Inclua o tipo do produto, a marca/modelo quando identificáveis e o
-principal benefício real. Não use HTML, quebra de linha, lista, slogan genérico
-ou informação que não esteja clara no nome do produto.
+curta: uma única frase comercial, natural e convincente, preferencialmente entre
+120 e 136 caracteres e nunca acima de 136. Aproveite o espaço para incluir o tipo
+do produto, a marca/modelo quando identificáveis e até dois benefícios reais.
+Não use HTML, quebra de linha, lista, slogan genérico ou informação que não
+esteja clara no nome do produto.
 
 longa: descrição em TEXTO PURO, pronta para copiar e colar.
 - NÃO use HTML nem markdown. Nada de <p>, <b>, <ul>, **, ##.
