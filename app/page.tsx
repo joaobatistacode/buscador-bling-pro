@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { montarZip, type ArquivoZip } from './zip';
 import { enviarProduto, type ResultadoEnvio } from './enviar-bling';
 import { ProductReview } from './components/product-review';
-import { BlingDescriptionMaintenance } from './components/bling-description-maintenance';
+import { BlingImageRecovery } from './components/bling-image-recovery';
 import { WorkflowStepper, type EtapaFluxo } from './components/workflow-stepper';
 import { type CampoImagem, type ProdutoResultado } from './produtos';
 
@@ -1031,7 +1031,7 @@ export default function Home() {
             </div>
 
             {bling.conectado && (
-              <BlingDescriptionMaintenance
+              <BlingImageRecovery
                 bloqueado={processando || buscandoImagens || baixando || enviandoBling}
                 aoMudarOcupado={setCorrigindoDescricaoBling}
               />
