@@ -20,7 +20,9 @@ const CHAVE_HISTORICO = 'buscador-bling:resultados';
 const CHAVE_GEMINI_SESSAO = 'buscador-bling:gemini';
 const CHAVE_SERPER_SESSAO = 'buscador-bling:serper';
 const CHAVE_SITES_IMAGENS = 'buscador-bling:sites-imagens';
+const CHAVE_LIMITE_CONSULTAS_IMAGENS = 'buscador-bling:limite-consultas-imagens';
 const SITES_IMAGENS_PADRAO = 'madeiramadeira.com.br';
+const LIMITE_CONSULTAS_IMAGENS_PADRAO = 3;
 
 // Cada lote vira um ZIP separado. Um ZIP único com centenas de produtos
 // fica grande demais para o navegador montar de uma vez só.
@@ -189,8 +191,10 @@ export default function Home() {
   const [apiKeyGemini, setApiKeyGemini] = useState('');
   const [apiKeyImg, setApiKeyImg] = useState('');
   const [sitesImagens, setSitesImagens] = useState(SITES_IMAGENS_PADRAO);
+  const [limiteConsultasImagens, setLimiteConsultasImagens] = useState(LIMITE_CONSULTAS_IMAGENS_PADRAO);
   const [resultados, setResultados] = useState<ProdutoResultado[]>([]);
   const [processando, setProcessando] = useState(false);
+  const [buscandoImagens, setBuscandoImagens] = useState(false);
   const [baixando, setBaixando] = useState(false);
   const [log, setLog] = useState('');
   const [aviso, setAviso] = useState('');
@@ -213,6 +217,9 @@ export default function Home() {
       setApiKeyGemini(sessionStorage.getItem(CHAVE_GEMINI_SESSAO) || '');
       setApiKeyImg(sessionStorage.getItem(CHAVE_SERPER_SESSAO) || '');
       setSitesImagens(localStorage.getItem(CHAVE_SITES_IMAGENS) || SITES_IMAGENS_PADRAO);
+      setLimiteConsultasImagens(Math.min(12, Math.max(1,
+        Number(localStorage.getItem(CHAVE_LIMITE_CONSULTAS_IMAGENS)) || LIMITE_CONSULTAS_IMAGENS_PADRAO
+      )));
     });
 
     try {
@@ -260,7 +267,8 @@ export default function Home() {
     sessionStorage.setItem(CHAVE_GEMINI_SESSAO, apiKeyGemini);
     sessionStorage.setItem(CHAVE_SERPER_SESSAO, apiKeyImg);
     localStorage.setItem(CHAVE_SITES_IMAGENS, sitesImagens);
-    setAviso('Configurações salvas. As chaves valem nesta sessão e os sites ficam neste navegador.');
+    localStorage.setItem(CHAVE_LIMITE_CONSULTAS_IMAGENS, String(limiteConsultasImagens));
+    setAviso('Configurações salvas. As chaves valem nesta sessão; sites e limite de consultas ficam neste navegador.');
     setVisaoAtual('fluxo');
   };
 
@@ -268,6 +276,9 @@ export default function Home() {
     setApiKeyGemini(sessionStorage.getItem(CHAVE_GEMINI_SESSAO) || '');
     setApiKeyImg(sessionStorage.getItem(CHAVE_SERPER_SESSAO) || '');
     setSitesImagens(localStorage.getItem(CHAVE_SITES_IMAGENS) || SITES_IMAGENS_PADRAO);
+    setLimiteConsultasImagens(Math.min(12, Math.max(1,
+      Number(localStorage.getItem(CHAVE_LIMITE_CONSULTAS_IMAGENS)) || LIMITE_CONSULTAS_IMAGENS_PADRAO
+    )));
     setVisaoAtual('fluxo');
   };
 
@@ -401,6 +412,85 @@ export default function Home() {
     setAviso('Imagem manual aplicada. Faça uma nova simulação antes de enviar ao Bling.');
   };
 
+  const buscarImagensNovamente = async (indices: number[]) => {
+    const unicos = [...new Set(indices)].filter(indice => resultados[indice]);
+    if (unicos.length === 0) return;
+    if (!apiKeyImg) {
+      setAviso('Configure a chave do Serper antes de buscar novas imagens.');
+      setVisaoAtual('configuracoes');
+      return;
+    }
+
+    setBuscandoImagens(true);
+    setAviso('');
+    pararRef.current = false;
+    let proximos = resultados;
+    let concluidos = 0;
+
+    for (let posicao = 0; posicao < unicos.length; posicao++) {
+      if (pararRef.current) break;
+      const indice = unicos[posicao];
+      const produto = proximos[indice];
+      setLog(`[${posicao + 1}/${unicos.length}] Buscando novas imagens: ${produto.nome}`);
+
+      try {
+        const resposta = await fetch('/api/processar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nome: produto.nome,
+            apiKeyImg,
+            sitesPreferenciais: sitesImagens
+              .split(/[\n,]+/)
+              .map(site => site.trim())
+              .filter(Boolean),
+            limiteConsultasImagens,
+            somenteImagens: true,
+          }),
+        });
+        const dados = await resposta.json();
+        if (!resposta.ok) throw new Error(dados.error || 'Falha ao consultar o Serper.');
+
+        proximos = proximos.map((item, itemIndice) => itemIndice === indice
+          ? { ...item, imagensSugeridas: Array.isArray(dados.imagens) ? dados.imagens : [] }
+          : item);
+        setResultados(proximos);
+        salvarHistorico(proximos);
+        concluidos++;
+      } catch (erro: unknown) {
+        const mensagem = erro instanceof Error ? erro.message : 'Erro desconhecido.';
+        setLog(`Falha ao buscar imagens de ${produto.codigo}: ${mensagem}`);
+      }
+    }
+
+    setBuscandoImagens(false);
+    setLoteAprovado(false);
+    setEnvios([]);
+    setLog(pararRef.current
+      ? `Busca interrompida com segurança: ${concluidos} de ${unicos.length} produto(s) concluídos.`
+      : `Nova busca concluída para ${concluidos} produto(s). Abra cada produto e escolha até 4 imagens.`);
+  };
+
+  const aplicarImagensSugeridas = (indiceProduto: number, urls: string[]) => {
+    if (urls.length === 0) return;
+    const proximos = resultados.map((produto, indice) => indice === indiceProduto
+      ? {
+          ...produto,
+          img1: urls[0] || '',
+          img2: urls[1] || '',
+          img3: urls[2] || '',
+          img4: urls[3] || '',
+          imagensSugeridas: undefined,
+          imagensExcluidas: {},
+        }
+      : produto);
+    setResultados(proximos);
+    salvarHistorico(proximos);
+    setLoteAprovado(false);
+    setEnvios([]);
+    setAviso(`${urls.length} nova(s) imagem(ns) aplicada(s). Faça uma nova simulação antes de enviar ao Bling.`);
+  };
+
   const iniciarProcessamento = async () => {
     if (!apiKeyGemini) {
       alert("Insira sua chave do Gemini.");
@@ -463,6 +553,7 @@ export default function Home() {
                 .split(/[\n,]+/)
                 .map(site => site.trim())
                 .filter(Boolean),
+              limiteConsultasImagens,
               referencias,
               // Repete a busca somente quando o produto ainda está sem foto.
               buscarImagens: !anterior?.img1,
@@ -695,7 +786,7 @@ export default function Home() {
     );
   };
 
-  const ocupado = processando || baixando || enviandoBling;
+  const ocupado = processando || buscandoImagens || baixando || enviandoBling;
 
   const sairAplicacao = async () => {
     await fetch('/api/acesso/sair', { method: 'POST' }).catch(() => null);
@@ -853,7 +944,22 @@ export default function Home() {
                       className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 font-mono text-sm font-normal text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                     />
                     <span className="mt-2 block text-xs font-normal leading-5 text-slate-500">
-                      Informe um domínio por linha. O sistema consulta esses sites primeiro e completa com a busca geral.
+                      Informe um domínio por linha, na ordem desejada. Até 12 sites são aceitos; a busca geral ocupa a última consulta quando o limite for maior que 1.
+                    </span>
+                  </label>
+
+                  <label className="block text-sm font-bold text-slate-800">
+                    Máximo de consultas do Serper por produto
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={limiteConsultasImagens}
+                      onChange={evento => setLimiteConsultasImagens(Math.min(12, Math.max(1, Number(evento.target.value) || 1)))}
+                      className="mt-2 w-32 rounded-xl border border-slate-300 bg-white px-3.5 py-3 font-normal text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    />
+                    <span className="mt-2 block text-xs font-normal leading-5 text-slate-500">
+                      Padrão: 3. Cada consulta consome 1 crédito. Para 400 produtos, o máximo será {400 * limiteConsultasImagens} créditos.
                     </span>
                   </label>
                 </div>
@@ -1092,12 +1198,28 @@ export default function Home() {
               </div>
             </div>
 
+            {buscandoImagens && (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+                <p className="text-sm font-semibold text-blue-900">{log || 'Buscando novas opções de imagens…'}</p>
+                <button
+                  type="button"
+                  onClick={() => { pararRef.current = true; }}
+                  className="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-bold text-red-700 hover:bg-red-50"
+                >
+                  Parar com segurança
+                </button>
+              </div>
+            )}
+
             <ProductReview
               produtos={resultados}
               ocupado={ocupado}
+              buscandoImagens={buscandoImagens}
               aoAlterar={atualizarResultado}
               aoAlterarImagem={alterarSelecaoImagem}
               aoDefinirImagem={definirImagemManual}
+              aoBuscarImagens={buscarImagensNovamente}
+              aoAplicarSugestoes={aplicarImagensSugeridas}
             />
 
             <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
