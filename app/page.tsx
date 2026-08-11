@@ -4,7 +4,6 @@ import { useRouter } from 'next/navigation';
 import { montarZip, type ArquivoZip } from './zip';
 import { enviarProduto, type ResultadoEnvio } from './enviar-bling';
 import { ProductReview } from './components/product-review';
-import { BlingImageRecovery } from './components/bling-image-recovery';
 import { WorkflowStepper, type EtapaFluxo } from './components/workflow-stepper';
 import { type CampoImagem, type ProdutoResultado } from './produtos';
 
@@ -205,7 +204,6 @@ export default function Home() {
   // Integração com o Bling
   const [bling, setBling] = useState({ conectado: false, configurado: false });
   const [enviandoBling, setEnviandoBling] = useState(false);
-  const [corrigindoDescricaoBling, setCorrigindoDescricaoBling] = useState(false);
   const [sobrescrever, setSobrescrever] = useState(false);
   const [unidadeMedida, setUnidadeMedida] = useState(1);
   const [envios, setEnvios] = useState<ResultadoEnvio[]>([]);
@@ -792,7 +790,7 @@ export default function Home() {
     );
   };
 
-  const ocupado = processando || buscandoImagens || baixando || enviandoBling || corrigindoDescricaoBling;
+  const ocupado = processando || buscandoImagens || baixando || enviandoBling;
 
   const sairAplicacao = async () => {
     await fetch('/api/acesso/sair', { method: 'POST' }).catch(() => null);
@@ -1030,12 +1028,6 @@ export default function Home() {
               </aside>
             </div>
 
-            {bling.conectado && (
-              <BlingImageRecovery
-                bloqueado={processando || buscandoImagens || baixando || enviandoBling}
-                aoMudarOcupado={setCorrigindoDescricaoBling}
-              />
-            )}
           </section>
         )}
 
