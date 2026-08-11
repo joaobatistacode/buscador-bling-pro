@@ -146,6 +146,15 @@ export async function POST(request: Request) {
   } = dados;
   const somenteDescricaoComplementar = dados.somenteDescricaoComplementar === true;
 
+  // Bloqueio emergencial: o PUT completo do Bling pode remover a mídia quando
+  // ela não é reenviada. Esta manutenção antiga não pode mais ser executada.
+  if (somenteDescricaoComplementar) {
+    return Response.json(
+      { erro: 'Manutenção SEM OBS bloqueada para proteger as imagens dos produtos.' },
+      { status: 409 }
+    );
+  }
+
   if (!codigo) {
     return Response.json({ erro: 'Faltou o código do produto.' }, { status: 400 });
   }
@@ -204,52 +213,6 @@ export async function POST(request: Request) {
   }
   if (atual.categoria?.id) corpo.categoria = { id: atual.categoria.id };
   if (atual.linhaProduto?.id) corpo.linhaProduto = { id: atual.linhaProduto.id };
-
-  // Manutenção rápida para produtos já enviados: preserva todo o cadastro e
-  // troca somente o texto que aparece nos pedidos da loja física.
-  if (somenteDescricaoComplementar) {
-    const descricaoAtual = String(atual.descricaoComplementar ?? '').trim();
-    if (simular) {
-      return Response.json({
-        codigo,
-        idProduto,
-        simulado: true,
-        descricaoAtual,
-        descricaoNova: DESCRICAO_COMPLEMENTAR_PADRAO,
-      });
-    }
-
-    if (descricaoAtual === DESCRICAO_COMPLEMENTAR_PADRAO) {
-      return Response.json({
-        codigo,
-        idProduto,
-        enviado: false,
-        jaCorrigido: true,
-        alterados: [],
-      });
-    }
-
-    corpo.descricaoComplementar = DESCRICAO_COMPLEMENTAR_PADRAO;
-    const correcao = await chamarBling(`/produtos/${idProduto}`, token, {
-      method: 'PUT',
-      body: JSON.stringify(corpo),
-    });
-
-    if (!correcao.ok) {
-      return Response.json(
-        { codigo, idProduto, erro: descreveErro(correcao.corpo, correcao.status) },
-        { status: correcao.status === 429 ? 429 : 502 }
-      );
-    }
-
-    return Response.json({
-      codigo,
-      idProduto,
-      enviado: true,
-      alterados: ['descricaoComplementar'],
-      avisosBling: correcao.corpo?.data?.warnings || [],
-    });
-  }
 
   const alterados: string[] = [];
   const ignorados: string[] = [];
