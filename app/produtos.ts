@@ -2,6 +2,16 @@ export const CAMPOS_IMAGEM = ['img1', 'img2', 'img3', 'img4'] as const;
 
 export type CampoImagem = (typeof CAMPOS_IMAGEM)[number];
 
+export interface ImagemSugerida {
+  url: string;
+  paginaOrigem: string;
+  largura: number | null;
+  altura: number | null;
+  origem: 'GALERIA' | 'SERPER';
+  metodo: 'ZOOM' | 'SRCSET' | 'JSON_LD' | 'META' | 'HTML' | 'SERPER';
+  qualidade: 'ALTA' | 'BOA';
+}
+
 export interface ProdutoResultado {
   codigo: string;
   nome: string;
@@ -23,5 +33,6 @@ export interface ProdutoResultado {
   img3?: string;
   img4?: string;
   imagensSugeridas?: string[];
+  imagensSugeridasDetalhes?: ImagemSugerida[];
   imagensExcluidas?: Partial<Record<CampoImagem, string>>;
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { lerCorpoLimitado, naoAutorizado, origemInvalida, origemPermitida, temAcesso } from '@/lib/acesso';
-import { buscarImagensComGaleria, pesquisarEspecificacoes, type FonteProduto } from '@/lib/product-research';
+import { buscarImagensComGaleria, pesquisarEspecificacoes, type FonteProduto, type ImagemPesquisada } from '@/lib/product-research';
 
 // Modelo "lite": cota gratuita bem maior que o flash normal, o que importa em lotes grandes.
 const MODELO_GEMINI = 'gemini-flash-lite-latest';
@@ -35,15 +35,21 @@ function limparHtml(texto: string): string {
 // Busca de imagens via Serper (resultados do Google Imagens).
 // O Mercado Livre bloqueia acesso anônimo e a Custom Search JSON API do Google
 // foi fechada para novos projetos, então esta é a fonte que resta funcionando.
-async function buscarImagensSerper(termo: string, chaveSerper: string, debug: any[]): Promise<string[]> {
+async function buscarImagensSerper(termo: string, chaveSerper: string, debug: any[]) {
   try {
     const dados = await buscarImagensComGaleria(termo, chaveSerper);
-    debug.push({ termo, resultados: dados.resultados, paginasAbertas: dados.paginas.length, imagensDaGaleria: dados.urls.length });
-    return dados.urls;
+    debug.push({
+      termo,
+      resultados: dados.resultados,
+      paginasEncontradas: dados.paginas.length,
+      paginasAbertas: dados.paginasAbertas,
+      imagensComResolucaoAprovada: dados.urls.length,
+    });
+    return { urls: dados.urls, detalhes: dados.detalhes };
   } catch (e: any) {
     debug.push({ termo, excecao: e.message });
   }
-  return [];
+  return { urls: [] as string[], detalhes: [] as ImagemPesquisada[] };
 }
 
 const normalizarBuscaImagem = (nome: string) => nome
@@ -350,6 +356,7 @@ export async function POST(request: Request) {
     // --- BUSCA DE IMAGENS ---
     const limiteResultados = somenteImagens ? 10 : 4;
     const imagensEncontradas: string[] = [];
+    const imagensDetalhes: ImagemPesquisada[] = [];
     const sitesPreferenciais = prepararSitesPreferenciais(body.sitesPreferenciais);
     const tentativas = montarTermosImagem(
       String(nome || ''),
@@ -366,10 +373,12 @@ export async function POST(request: Request) {
     } else if (apiKeyImg) {
       for (const tentativa of tentativas) {
         if (!tentativa.trim()) continue;
-        const urls = await buscarImagensSerper(tentativa, apiKeyImg.trim(), debugImg);
-        for (const url of urls) {
+        const pesquisa = await buscarImagensSerper(tentativa, apiKeyImg.trim(), debugImg);
+        for (const url of pesquisa.urls) {
           if (!imagensEncontradas.includes(url)) {
             imagensEncontradas.push(url);
+            const detalhe = pesquisa.detalhes.find(item => item.url === url);
+            if (detalhe) imagensDetalhes.push(detalhe);
             if (imagensEncontradas.length >= limiteResultados) break;
           }
         }
@@ -380,7 +389,7 @@ export async function POST(request: Request) {
     }
 
     if (somenteImagens) {
-      return NextResponse.json({ imagens: imagensEncontradas, debugImg });
+      return NextResponse.json({ imagens: imagensEncontradas, imagensDetalhes, debugImg });
     }
 
     // --- DESCRIÇÕES E FICHA (GEMINI) ---
@@ -420,6 +429,7 @@ export async function POST(request: Request) {
       justificativaMedidas: ficha.justificativaMedidas,
       fonteMedidas: ficha.fonteMedidas,
       imagens: imagensEncontradas,
+      imagensDetalhes,
       cotaExcedida,
       esperarSegundos,
       debugImg
