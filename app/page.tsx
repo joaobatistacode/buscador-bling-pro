@@ -517,7 +517,11 @@ export default function Home() {
         if (!resposta.ok) throw new Error(dados.error || 'Falha ao consultar o Serper.');
 
         proximos = proximos.map((item, itemIndice) => itemIndice === indice
-          ? { ...item, imagensSugeridas: Array.isArray(dados.imagens) ? dados.imagens : [] }
+          ? {
+              ...item,
+              imagensSugeridas: Array.isArray(dados.imagens) ? dados.imagens : [],
+              imagensSugeridasDetalhes: Array.isArray(dados.imagensDetalhes) ? dados.imagensDetalhes : [],
+            }
           : item);
         setResultados(proximos);
         salvarHistorico(proximos);
@@ -546,6 +550,7 @@ export default function Home() {
           img3: urls[2] || '',
           img4: urls[3] || '',
           imagensSugeridas: undefined,
+          imagensSugeridasDetalhes: undefined,
           imagensExcluidas: {},
         }
       : produto);

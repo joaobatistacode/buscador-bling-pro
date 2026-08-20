@@ -271,7 +271,7 @@ export function ProductReview({
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h4 className="text-sm font-bold text-emerald-950">Novas opções encontradas</h4>
-                  <p className="mt-1 text-xs text-emerald-800">Selecione até 4 imagens corretas. As atuais só mudam quando você aplicar.</p>
+                  <p className="mt-1 text-xs text-emerald-800">Somente arquivos com resolução verificada aparecem aqui. Selecione até 4; as atuais só mudam quando você aplicar.</p>
                 </div>
                 <span className="rounded-full bg-white px-2.5 py-1 text-xs font-bold text-emerald-800">{selecionadas.length}/4</span>
               </div>
@@ -280,21 +280,35 @@ export function ProductReview({
                   <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
                     {produto.imagensSugeridas.map((url, indice) => {
                       const marcada = selecionadas.includes(url);
+                      const detalhe = produto.imagensSugeridasDetalhes?.find(item => item.url === url);
                       return (
-                        <button
-                          key={`${url}-${indice}`}
-                          type="button"
-                          onClick={() => alternarSugestao(url)}
-                          disabled={ocupado || (!marcada && selecionadas.length >= 4)}
-                          className={`overflow-hidden rounded-lg border-2 bg-white text-left transition disabled:opacity-50 ${marcada ? 'border-emerald-600 ring-2 ring-emerald-200' : 'border-white hover:border-emerald-300'}`}
-                        >
-                          <span className="relative block aspect-square">
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={url} alt={`Opção ${indice + 1} para ${produto.nome}`} className="h-full w-full object-contain p-2" />
-                            {marcada && <span className="absolute right-2 top-2 rounded-full bg-emerald-600 px-2 py-1 text-[10px] font-black text-white">✓</span>}
-                          </span>
-                          <span className="block truncate border-t border-slate-100 px-2 py-1.5 text-[10px] text-slate-500">{dominioDaImagem(url)}</span>
-                        </button>
+                        <div key={`${url}-${indice}`} className={`overflow-hidden rounded-lg border-2 bg-white transition ${marcada ? 'border-emerald-600 ring-2 ring-emerald-200' : 'border-white hover:border-emerald-300'}`}>
+                          <button
+                            type="button"
+                            onClick={() => alternarSugestao(url)}
+                            disabled={ocupado || (!marcada && selecionadas.length >= 4)}
+                            className="block w-full text-left disabled:opacity-50"
+                          >
+                            <span className="relative block aspect-square">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img src={url} alt={`Opção ${indice + 1} para ${produto.nome}`} className="h-full w-full object-contain p-2" />
+                              {marcada && <span className="absolute right-2 top-2 rounded-full bg-emerald-600 px-2 py-1 text-[10px] font-black text-white">✓</span>}
+                              {detalhe && <span className="absolute bottom-2 left-2 rounded-full bg-slate-950/80 px-2 py-1 text-[9px] font-black text-white">{detalhe.qualidade}</span>}
+                            </span>
+                            <span className="block border-t border-slate-100 px-2 py-2">
+                              <span className="block truncate text-[10px] font-bold text-slate-700">{dominioDaImagem(url)}</span>
+                              <span className="mt-0.5 block text-[10px] text-slate-500">
+                                {detalhe?.largura && detalhe?.altura ? `${detalhe.largura}×${detalhe.altura}px` : 'resolução verificada'}
+                                {detalhe ? ` • ${detalhe.origem === 'GALERIA' ? 'galeria' : 'imagem original'}` : ''}
+                              </span>
+                            </span>
+                          </button>
+                          {detalhe?.paginaOrigem && /^https?:\/\//i.test(detalhe.paginaOrigem) && (
+                            <a href={detalhe.paginaOrigem} target="_blank" rel="noreferrer" className="block border-t border-slate-100 px-2 py-1.5 text-[10px] font-bold text-blue-700 hover:bg-blue-50">
+                              Abrir página de origem ↗
+                            </a>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
