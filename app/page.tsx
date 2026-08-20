@@ -6,6 +6,7 @@ import { enviarProduto, type ResultadoEnvio } from './enviar-bling';
 import { ProductReview } from './components/product-review';
 import { WorkflowStepper, type EtapaFluxo } from './components/workflow-stepper';
 import { type CampoImagem, type ProdutoResultado } from './produtos';
+import { DashboardView, HistoryView, TasksView } from './components/operations-hub';
 
 const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -184,7 +185,7 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 
 export default function Home() {
   const router = useRouter();
-  const [visaoAtual, setVisaoAtual] = useState<'fluxo' | 'configuracoes'>('fluxo');
+  const [visaoAtual, setVisaoAtual] = useState<'dashboard' | 'fluxo' | 'historico' | 'tarefas' | 'configuracoes'>('fluxo');
   const [etapaAtual, setEtapaAtual] = useState(1);
   const [loteAprovado, setLoteAprovado] = useState(false);
   const [textoColado, setTextoColado] = useState('');
@@ -212,6 +213,7 @@ export default function Home() {
 
   // Pedido de parada: o botão marca aqui e o laço encerra no próximo produto.
   const pararRef = useRef(false);
+  const sincronizarRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Recupera o que já tinha sido processado numa sessão anterior.
   useEffect(() => {
@@ -230,6 +232,10 @@ export default function Home() {
         const dados = JSON.parse(salvo);
         if (Array.isArray(dados) && dados.length > 0) {
           setResultados(dados);
+          fetch('/api/historico', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ produtos: dados }),
+          }).catch(() => null);
           setAviso(
             `${dados.length} produto(s) recuperados da sessão anterior. ` +
             `Você pode baixar o ZIP direto, sem reprocessar.`
@@ -318,6 +324,7 @@ export default function Home() {
     setAviso('');
 
     const saidas: ResultadoEnvio[] = [];
+    const inicioEnvio = Date.now();
 
     for (let i = 0; i < produtos.length; i++) {
       if (pararRef.current) {
@@ -346,12 +353,36 @@ export default function Home() {
         ? `Simulação concluída em ${saidas.length} produto(s). Confira abaixo o que seria alterado.`
         : `Envio concluído: ${okey} atualizados no Bling, ${falhos} com erro.`
     );
+
+    if (!simular) {
+      const enviados = new Set(saidas.filter(s => s.enviado).map(s => s.codigo));
+      const atualizados = resultados.map(produto => enviados.has(produto.codigo)
+        ? { ...produto, enviadoBling: true, enviadoEm: new Date().toISOString() }
+        : produto);
+      setResultados(atualizados);
+      salvarHistorico(atualizados);
+
+      if (telegram.configurado) {
+        const tipo = pararRef.current ? 'envio_interrompido' : falhos > 0 ? 'envio_com_alertas' : 'envio_concluido';
+        fetch('/api/notificacao/telegram', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tipo, total: produtos.length, enviados: okey, erros: falhos, processados: saidas.length, duracaoSegundos: Math.round((Date.now() - inicioEnvio) / 1000), codigosErro: saidas.filter(s => s.erro).slice(0, 8).map(s => s.codigo) }),
+        }).catch(() => null);
+      }
+    }
   };
 
   // Grava a cada produto: se faltar energia, no máximo um produto se perde.
   const salvarHistorico = (dados: ProdutoResultado[]) => {
     try {
       localStorage.setItem(CHAVE_HISTORICO, JSON.stringify(dados));
+      if (sincronizarRef.current) clearTimeout(sincronizarRef.current);
+      sincronizarRef.current = setTimeout(() => {
+        fetch('/api/historico', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ produtos: dados }),
+        }).catch(() => null);
+      }, 800);
     } catch {
       setAviso(
         'Atenção: o histórico não coube no armazenamento do navegador. ' +
@@ -414,6 +445,14 @@ export default function Home() {
     const proximos = resultados.map((produto, indice) =>
       indice === indiceProduto ? { ...produto, [campo]: valor } : produto
     );
+    setResultados(proximos);
+    salvarHistorico(proximos);
+    setEnvios([]);
+    setLoteAprovado(false);
+  };
+
+  const marcarRevisado = (indiceProduto: number, revisado: boolean) => {
+    const proximos = resultados.map((produto, indice) => indice === indiceProduto ? { ...produto, revisado } : produto);
     setResultados(proximos);
     salvarHistorico(proximos);
     setEnvios([]);
@@ -637,7 +676,6 @@ export default function Home() {
           codigo,
           nome,
           curta: anterior?.curta || dados.curta || "",
-          longa: anterior?.longa || dados.longa || "",
           marca: anterior && !semInformacao(anterior.marca)
             ? anterior.marca
             : dados.marca || "",
@@ -650,6 +688,7 @@ export default function Home() {
             : dados.origemMedidas || anterior?.origemMedidas || "",
           codigoReferencia: dados.codigoReferencia || "",
           justificativaMedidas: dados.justificativaMedidas || "",
+          fonteMedidas: dados.fonteMedidas || anterior?.fonteMedidas || "",
           img1: anterior?.img1 || dados.imagens?.[0] || "",
           img2: anterior?.img2 || dados.imagens?.[1] || "",
           img3: anterior?.img3 || dados.imagens?.[2] || "",
@@ -712,15 +751,15 @@ export default function Home() {
   const exportarCSV = () => {
     // Ponto e vírgula para o Excel separar as colunas corretamente
     const cabecalho =
-      "Código;Produto;Marca;Peso;Largura;Altura;Profundidade;Origem das medidas;Código de referência;" +
-      "Descrição Curta;Descrição;Imagem 1;Imagem 2;Imagem 3;Imagem 4\n";
+      "Código;Produto;Marca;Peso;Largura;Altura;Profundidade;Origem das medidas;Código de referência;Fonte das medidas;" +
+      "Descrição Curta;Imagem 1;Imagem 2;Imagem 3;Imagem 4\n";
 
     const aspas = (valor: unknown) => `"${String(valor || "").replace(/"/g, '""')}"`;
 
     const linhasCSV = resultados.map(r => [
       r.codigo, r.nome, r.marca, r.peso, r.largura, r.altura, r.profundidade,
-      r.origemMedidas, r.codigoReferencia,
-      r.curta, r.longa, r.img1, r.img2, r.img3, r.img4
+      r.origemMedidas, r.codigoReferencia, r.fonteMedidas,
+      r.curta, r.img1, r.img2, r.img3, r.img4
     ].map(aspas).join(";")).join("\n");
 
     // "\uFEFF" na frente avisa o Excel que é UTF-8, consertando os acentos
@@ -798,12 +837,13 @@ export default function Home() {
           `PROFUNDIDADE: ${res.profundidade}\n\n` +
           `ORIGEM: ${res.origemMedidas === 'REAPROVEITADO'
             ? `reaproveitado do código ${res.codigoReferencia}`
+            : res.origemMedidas === 'REAL'
+              ? `fonte real: ${res.fonteMedidas}`
             : res.origemMedidas === 'COMPLEMENTADO'
               ? 'ficha anterior complementada pela IA'
               : 'estimativa da IA'}\n` +
           `OBSERVAÇÃO: ${res.justificativaMedidas || 'Confira as medidas antes de cadastrar.'}\n\n` +
-          `=== DESCRIÇÃO CURTA ===\n${res.curta}\n\n` +
-          `=== DESCRIÇÃO LONGA ===\n${res.longa}\n`;
+          `=== DESCRIÇÃO CURTA ===\n${res.curta}\n`;
 
         arquivos.push({
           caminho: `${codigo}/${codigo}_descricao.txt`,
@@ -855,7 +895,7 @@ export default function Home() {
   const comErro = resultados.filter(deuErro).length;
   const semImagem = resultados.filter(produto => !produto.img1).length;
   const medidasParaConferir = resultados.filter(produto =>
-    produto.origemMedidas !== 'REAPROVEITADO'
+    !['REAL', 'REAPROVEITADO'].includes(String(produto.origemMedidas))
   ).length;
 
   const podeAcessarEtapa = (numero: number) => {
@@ -874,42 +914,29 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-100 text-slate-950">
-      <header className="border-b border-slate-200 bg-white">
+    <main className="min-h-screen bg-[#f4f7f8] text-slate-950">
+      <header className="border-b border-white/10 bg-[#071a24] text-white shadow-[0_8px_30px_rgba(7,26,36,.18)]">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-5 md:px-8">
           <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-lg font-black text-white shadow-sm">
-              B
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-cyan-400 text-lg font-black text-[#071a24] shadow-sm">
+              JB
             </div>
             <div>
-              <h1 className="text-lg font-bold tracking-tight text-slate-950 md:text-xl">Enriquecedor Bling PRO</h1>
-              <p className="text-xs text-slate-500">Preparação segura de produtos para marketplaces</p>
+              <h1 className="text-lg font-black tracking-tight text-white md:text-xl">Catálogo JB</h1>
+              <p className="text-xs text-slate-300">Operação inteligente integrada ao Bling</p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="hidden rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 sm:inline">
-              Sessão protegida
-            </span>
-            <button
-              type="button"
-              onClick={() => visaoAtual === 'configuracoes'
-                ? cancelarConfiguracoes()
-                : setVisaoAtual('configuracoes')}
-              disabled={ocupado}
-              aria-current={visaoAtual === 'configuracoes' ? 'page' : undefined}
-              className={`rounded-lg border px-3.5 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                visaoAtual === 'configuracoes'
-                  ? 'border-blue-600 bg-blue-50 text-blue-700'
-                  : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-              }`}
-            >
-              ⚙ Configurações
-            </button>
+          <div className="flex items-center gap-2">
+            {([['dashboard','Dashboard'],['fluxo','Produtos'],['historico','Histórico'],['tarefas','Tarefas'],['configuracoes','Config.']] as const).map(([visao, rotulo]) => (
+              <button key={visao} type="button" onClick={() => setVisaoAtual(visao)} disabled={ocupado} aria-current={visaoAtual === visao ? 'page' : undefined} className={`hidden rounded-lg px-3 py-2 text-sm font-bold transition md:block ${visaoAtual === visao ? 'bg-cyan-400 text-[#071a24]' : 'text-slate-300 hover:bg-white/10 hover:text-white'} disabled:opacity-40`}>
+                {rotulo}
+              </button>
+            ))}
             <button
               type="button"
               onClick={sairAplicacao}
               disabled={ocupado}
-              className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-lg border border-white/20 bg-white/5 px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Sair
             </button>
@@ -918,6 +945,16 @@ export default function Home() {
       </header>
 
       <div className="mx-auto max-w-7xl px-5 py-6 md:px-8 md:py-8">
+        <div className="mb-5 flex gap-2 overflow-x-auto md:hidden">
+          {([['dashboard','Dashboard'],['fluxo','Produtos'],['historico','Histórico'],['tarefas','Tarefas'],['configuracoes','Config.']] as const).map(([visao, rotulo]) => <button key={visao} onClick={() => setVisaoAtual(visao)} className={`shrink-0 rounded-lg px-3 py-2 text-sm font-bold ${visaoAtual === visao ? 'bg-slate-950 text-white' : 'bg-white text-slate-600'}`}>{rotulo}</button>)}
+        </div>
+        {visaoAtual === 'dashboard' && <DashboardView />}
+        {visaoAtual === 'historico' && <HistoryView aoAbrir={(produto) => {
+          const indice = resultados.findIndex(item => item.codigo === produto.codigo);
+          const proximos = indice >= 0 ? resultados.map((item, i) => i === indice ? { ...item, ...produto } : item) : [...resultados, produto];
+          setResultados(proximos); salvarHistorico(proximos); setLoteAprovado(false); setEtapaAtual(3); setVisaoAtual('fluxo');
+        }} />}
+        {visaoAtual === 'tarefas' && <TasksView />}
         {visaoAtual === 'fluxo' && (
           <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:p-5">
             <WorkflowStepper
@@ -1311,6 +1348,7 @@ export default function Home() {
               aoDefinirImagem={definirImagemManual}
               aoBuscarImagens={buscarImagensNovamente}
               aoAplicarSugestoes={aplicarImagensSugeridas}
+              aoMarcarRevisado={marcarRevisado}
             />
 
             <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
