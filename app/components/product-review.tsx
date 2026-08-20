@@ -11,6 +11,7 @@ interface ProductReviewProps {
   aoDefinirImagem: (indice: number, campo: CampoImagem, url: string) => void;
   aoBuscarImagens: (indices: number[]) => void;
   aoAplicarSugestoes: (indice: number, urls: string[]) => void;
+  aoMarcarRevisado: (indice: number, revisado: boolean) => void;
   buscandoImagens: boolean;
 }
 
@@ -27,9 +28,11 @@ export function ProductReview({
   aoDefinirImagem,
   aoBuscarImagens,
   aoAplicarSugestoes,
+  aoMarcarRevisado,
   buscandoImagens,
 }: ProductReviewProps) {
   const [busca, setBusca] = useState('');
+  const [somentePendentes, setSomentePendentes] = useState(false);
   const [selecionado, setSelecionado] = useState(0);
   const [urlsEmEdicao, setUrlsEmEdicao] = useState<Record<string, string>>({});
   const [erroImagem, setErroImagem] = useState('');
@@ -40,10 +43,9 @@ export function ProductReview({
     const termo = busca.trim().toLocaleLowerCase('pt-BR');
     return produtos
       .map((produto, indice) => ({ produto, indice }))
-      .filter(({ produto }) => !termo ||
-        produto.codigo.toLocaleLowerCase('pt-BR').includes(termo) ||
-        produto.nome.toLocaleLowerCase('pt-BR').includes(termo));
-  }, [busca, produtos]);
+      .filter(({ produto }) => !somentePendentes || !produto.revisado)
+      .filter(({ produto }) => !termo || produto.codigo.toLocaleLowerCase('pt-BR').includes(termo) || produto.nome.toLocaleLowerCase('pt-BR').includes(termo));
+  }, [busca, produtos, somentePendentes]);
 
   const indiceDentroDaLista = Math.min(selecionado, Math.max(produtos.length - 1, 0));
   const indiceSelecionado = filtrados.some(item => item.indice === indiceDentroDaLista)
@@ -98,6 +100,13 @@ export function ProductReview({
     });
   };
 
+  const revisarEAvancar = () => {
+    aoMarcarRevisado(indiceSelecionado, true);
+    const posicao = filtrados.findIndex(item => item.indice === indiceSelecionado);
+    const proximo = filtrados[posicao + 1]?.indice ?? filtrados.find(item => !item.produto.revisado && item.indice !== indiceSelecionado)?.indice;
+    if (proximo !== undefined) setSelecionado(proximo);
+  };
+
   return (
     <div className="grid min-h-[640px] overflow-hidden rounded-2xl border border-slate-200 bg-white lg:grid-cols-[320px_minmax(0,1fr)]">
       <aside className="border-b border-slate-200 bg-slate-50 lg:border-b-0 lg:border-r">
@@ -126,6 +135,7 @@ export function ProductReview({
               {todosFiltradosMarcados ? 'Desmarcar' : 'Marcar lista'}
             </button>
           </div>
+          <label className="mt-3 flex items-center gap-2 text-xs font-bold text-slate-600"><input type="checkbox" checked={somentePendentes} onChange={e => setSomentePendentes(e.target.checked)} /> Mostrar somente não revisados</label>
           <button
             type="button"
             onClick={() => aoBuscarImagens(marcados)}
@@ -188,6 +198,9 @@ export function ProductReview({
             <h3 className="mt-1 text-xl font-bold text-slate-950">{produto.nome}</h3>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={revisarEAvancar} disabled={ocupado} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-black text-white hover:bg-emerald-700 disabled:opacity-40">
+              {produto.revisado ? 'Revisado ✓' : 'Aprovar e próximo →'}
+            </button>
             <button
               type="button"
               onClick={() => aoBuscarImagens([indiceSelecionado])}
@@ -375,14 +388,17 @@ export function ProductReview({
             <strong className="text-slate-800">Origem das medidas:</strong>{' '}
             {produto.origemMedidas === 'REAPROVEITADO'
               ? `reaproveitadas do código ${produto.codigoReferencia}`
+              : produto.origemMedidas === 'REAL'
+                ? 'dados reais encontrados em uma fonte publicada'
               : produto.origemMedidas === 'COMPLEMENTADO'
                 ? 'ficha anterior complementada pela IA'
                 : 'estimativa da IA'}
             {produto.justificativaMedidas ? ` — ${produto.justificativaMedidas}` : ''}
+            {produto.fonteMedidas && <a href={produto.fonteMedidas} target="_blank" rel="noreferrer" className="ml-2 font-bold text-cyan-700 underline">Abrir fonte</a>}
           </div>
         )}
 
-        <div className="mt-6 grid gap-5 xl:grid-cols-2">
+        <div className="mt-6">
           <label className="text-sm font-bold text-slate-900">
             Descrição curta
             <textarea
@@ -398,19 +414,6 @@ export function ProductReview({
             }`}>
               <span>Texto comercial exibido na loja virtual</span>
               <span>{(produto.curta || '').length}/136</span>
-            </span>
-          </label>
-          <label className="text-sm font-bold text-slate-900">
-            Descrição longa — não enviada ao Bling
-            <textarea
-              value={produto.longa || ''}
-              onChange={evento => aoAlterar(indiceSelecionado, 'longa', evento.target.value)}
-              disabled={ocupado}
-              rows={10}
-              className="mt-2 w-full resize-y rounded-xl border border-slate-300 bg-white p-3 text-sm font-normal leading-6 text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100"
-            />
-            <span className="mt-1 block text-xs font-normal normal-case tracking-normal text-slate-500">
-              Mantida apenas no sistema, CSV e arquivos. A descrição complementar do Bling receberá “SEM OBS”.
             </span>
           </label>
         </div>

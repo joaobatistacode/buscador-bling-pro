@@ -15,7 +15,15 @@
 /* Tema claro fixo: a tabela e os campos são feitos para fundo claro,
    então seguir o tema escuro do sistema deixava tudo ilegível. */
 body {
-  background: var(--background);
+  background:
+    radial-gradient(circle at 8% 0%, rgba(34, 211, 238, .08), transparent 28rem),
+    var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
+
+button, input, textarea, select {
+  transition: border-color .16s ease, background-color .16s ease, color .16s ease, box-shadow .16s ease, transform .16s ease;
+}
+
+button:active:not(:disabled) { transform: translateY(1px); }

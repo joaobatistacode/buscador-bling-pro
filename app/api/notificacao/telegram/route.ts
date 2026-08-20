@@ -117,6 +117,28 @@ export async function POST(request: Request) {
       '',
       'Abra o Enriquecedor Bling PRO para revisar.',
     ].filter(Boolean).join('\n');
+  } else if (['envio_concluido', 'envio_com_alertas', 'envio_interrompido'].includes(String(dados.tipo))) {
+    const total = numeroSeguro(dados.total);
+    const processados = numeroSeguro(dados.processados, total);
+    const enviados = numeroSeguro(dados.enviados, total);
+    const erros = numeroSeguro(dados.erros, total);
+    const codigos = Array.isArray(dados.codigosErro)
+      ? dados.codigosErro.map(item => String(item).slice(0, 40)).slice(0, 8)
+      : [];
+    const interrompido = dados.tipo === 'envio_interrompido';
+    const alertas = dados.tipo === 'envio_com_alertas';
+    texto = [
+      interrompido ? '⏸️ <b>Envio ao Bling interrompido</b>' : alertas ? '⚠️ <b>Envio ao Bling terminou com alertas</b>' : '✅ <b>Envio ao Bling concluído</b>',
+      '',
+      `📦 ${total} produto(s) no lote`,
+      `🔎 ${processados} processado(s)`,
+      `🟢 ${enviados} atualizado(s) no Bling`,
+      `🔴 ${erros} com erro`,
+      codigos.length ? `Códigos com falha: ${codigos.join(', ')}` : '',
+      `⏱️ Tempo: ${duracaoLegivel(dados.duracaoSegundos)}`,
+      '',
+      interrompido ? 'O progresso foi preservado. Abra o sistema para continuar.' : alertas ? 'Abra o sistema para revisar as falhas.' : 'O lote foi finalizado com sucesso.',
+    ].filter(Boolean).join('\n');
   } else {
     return Response.json({ erro: 'Tipo de notificação inválido.' }, { status: 400 });
   }
