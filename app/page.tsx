@@ -948,7 +948,12 @@ export default function Home() {
         <div className="mb-5 flex gap-2 overflow-x-auto md:hidden">
           {([['dashboard','Dashboard'],['fluxo','Produtos'],['historico','Histórico'],['tarefas','Tarefas'],['configuracoes','Config.']] as const).map(([visao, rotulo]) => <button key={visao} onClick={() => setVisaoAtual(visao)} className={`shrink-0 rounded-lg px-3 py-2 text-sm font-bold ${visaoAtual === visao ? 'bg-slate-950 text-white' : 'bg-white text-slate-600'}`}>{rotulo}</button>)}
         </div>
-        {visaoAtual === 'dashboard' && <DashboardView />}
+        {visaoAtual === 'dashboard' && (
+          <DashboardView
+            geminiConfigurado={Boolean(apiKeyGemini)}
+            serperConfigurado={Boolean(apiKeyImg)}
+          />
+        )}
         {visaoAtual === 'historico' && <HistoryView aoAbrir={(produto) => {
           const indice = resultados.findIndex(item => item.codigo === produto.codigo);
           const proximos = indice >= 0 ? resultados.map((item, i) => i === indice ? { ...item, ...produto } : item) : [...resultados, produto];
