@@ -33,9 +33,13 @@ type ImagemVerificada = Omit<CandidataImagem, 'largura' | 'altura'> & {
   altura: number;
 };
 
-const MAX_HTML = 1_200_000;
+const MAX_HTML = 2_000_000;
 const MAX_BYTES_IMAGEM = 512 * 1024;
-const MAX_CANDIDATAS_VERIFICADAS = 20;
+const MAX_CANDIDATAS_VERIFICADAS = 36;
+const AREA_MINIMA = 160_000;
+const MAIOR_LADO_MINIMO = 400;
+const AREA_PREFERIDA = 250_000;
+const MAIOR_LADO_PREFERIDO = 600;
 
 const limpar = (texto: string) => texto
   .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
@@ -116,7 +120,9 @@ const tokensProduto = (termo: string) => termo
   .filter(token => token.length >= 3 && !['com', 'sem', 'para', 'produto', 'site'].includes(token));
 
 const pareceDecorativa = (url: string) => /(?:^|[\/_\-.])(logo|icon|icone|sprite|banner|pixel|avatar|placeholder|loading|favicon)(?:[\/_\-.]|$)/i.test(url);
-const pareceMiniatura = (url: string) => /(?:thumb|thumbnail|miniatura|small|tiny|lowres|_xs(?:[_.-]|$)|_sm(?:[_.-]|$)|[?&](?:w|width|h|height)=(?:[1-4]?\d{1,2}))(?:[^a-z]|$)/i.test(url);
+const pareceMiniatura = (url: string) =>
+  /(?:^|[\/_\-.])(?:thumb|thumbnail|miniatura|small|tiny|lowres|_xs|_sm)(?:[\/_\-.]|$)/i.test(url) ||
+  /[?&](?:w|width|h|height)=(?:[1-4]?\d{1,2})(?=&|#|$)/i.test(url);
 
 function lerAtributos(tag: string) {
   const atributos = new Map<string, string>();
@@ -134,25 +140,31 @@ function melhorSrcset(valor: string) {
   }).filter(item => item.url).sort((a, b) => b.medida - a.medida)[0]?.url || '';
 }
 
-function coletarImagensJsonLd(valor: unknown, saida: string[]) {
-  if (saida.length >= 40 || valor === null || valor === undefined) return;
+function coletarImagensEstruturadas(valor: unknown, saida: string[], contextoImagem = false) {
+  if (saida.length >= 80 || valor === null || valor === undefined) return;
   if (typeof valor === 'string') {
-    if (/^https?:\/\//i.test(valor)) saida.push(valor);
+    if (contextoImagem && /^(?:https?:)?\/\//i.test(valor)) saida.push(valor);
     return;
   }
   if (Array.isArray(valor)) {
-    valor.forEach(item => coletarImagensJsonLd(item, saida));
+    valor.forEach(item => coletarImagensEstruturadas(item, saida, contextoImagem));
     return;
   }
   if (typeof valor !== 'object') return;
   const objeto = valor as Record<string, unknown>;
   for (const [chave, item] of Object.entries(objeto)) {
-    if (/^(?:image|images|contentUrl)$/i.test(chave)) coletarImagensJsonLd(item, saida);
-    else if (typeof item === 'object' && item !== null) coletarImagensJsonLd(item, saida);
+    const chaveImagem = /(?:image|imagem|photo|foto|gallery|galeria|media|picture)/i.test(chave);
+    const chaveArquivo = /^(?:src|url|contentUrl|full|original|zoom|large|master)$/i.test(chave);
+    const proximoContexto = contextoImagem || chaveImagem;
+    if (typeof item === 'string') {
+      if ((chaveImagem || (contextoImagem && chaveArquivo)) && /^(?:https?:)?\/\//i.test(item)) saida.push(item);
+    } else if (typeof item === 'object' && item !== null) {
+      coletarImagensEstruturadas(item, saida, proximoContexto);
+    }
   }
 }
 
-function extrairImagens(html: string, pagina: string, termo: string) {
+export function extrairImagens(html: string, pagina: string, termo: string) {
   const candidatas: CandidataImagem[] = [];
   const tokens = tokensProduto(termo);
   const adicionar = (bruto: string, metodo: CandidataImagem['metodo'], contexto = '') => {
@@ -167,13 +179,25 @@ function extrairImagens(html: string, pagina: string, termo: string) {
     else if (pontuacao > existente.pontuacao) Object.assign(existente, { metodo, pontuacao });
   };
 
-  const scripts = html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
+  const scripts = html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi);
   for (const script of scripts) {
+    const atributos = lerAtributos(script[1]);
+    const tipo = (atributos.get('type') || '').toLowerCase();
+    const id = (atributos.get('id') || '').toLowerCase();
+    const corpo = script[2].trim();
+    const pareceJson = tipo.includes('json') || id === '__next_data__' || id.includes('product-json');
+    if (!pareceJson || corpo.length > 1_500_000) continue;
     try {
       const urls: string[] = [];
-      coletarImagensJsonLd(JSON.parse(script[1]), urls);
+      coletarImagensEstruturadas(JSON.parse(corpo), urls);
       urls.forEach(url => adicionar(url, 'JSON_LD'));
-    } catch { /* JSON-LD inválido não impede as outras estratégias. */ }
+    } catch { /* JSON embutido inválido não impede as outras estratégias. */ }
+  }
+
+  for (const bloco of html.matchAll(/["'](?:images?|gallery|galeria|media)["']\s*:\s*\[([\s\S]{0,120000}?)\]/gi)) {
+    for (const item of bloco[1].matchAll(/["']((?:https?:)?\\?\/\\?\/[^"']+)["']/gi)) {
+      adicionar(item[1], 'JSON_LD');
+    }
   }
 
   for (const meta of html.matchAll(/<meta\b[^>]*>/gi)) {
@@ -185,17 +209,32 @@ function extrairImagens(html: string, pagina: string, termo: string) {
   for (const tag of html.matchAll(/<(?:img|source)\b[^>]*>/gi)) {
     const atributos = lerAtributos(tag[0]);
     const contexto = `${atributos.get('alt') || ''} ${atributos.get('title') || ''}`;
-    const zoom = atributos.get('data-zoom-image') || atributos.get('data-large') ||
-      atributos.get('data-large-image') || atributos.get('data-original');
+    const zoom = atributos.get('data-zoom-image') || atributos.get('data-zoom') ||
+      atributos.get('data-large') || atributos.get('data-large-image') ||
+      atributos.get('data-image-large') || atributos.get('data-full') ||
+      atributos.get('data-full-image') || atributos.get('data-original') ||
+      atributos.get('data-original-src') || atributos.get('data-image');
     if (zoom) adicionar(zoom, 'ZOOM', contexto);
     const srcset = atributos.get('data-srcset') || atributos.get('srcset');
     if (srcset) adicionar(melhorSrcset(srcset), 'SRCSET', contexto);
-    const src = atributos.get('data-src') || atributos.get('data-lazy-src') || atributos.get('src');
+    const src = atributos.get('data-src') || atributos.get('data-lazy-src') ||
+      atributos.get('data-lazy') || atributos.get('data-thumb') || atributos.get('src');
     if (src) adicionar(src, 'HTML', contexto);
   }
 
-  for (const casa of html.matchAll(/["'](?:zoom|zoomImage|largeImage|fullImage|original|imageUrl)["']\s*:\s*["']([^"']+)["']/gi)) adicionar(casa[1], 'ZOOM');
-  return candidatas.sort((a, b) => b.pontuacao - a.pontuacao).slice(0, 40);
+  for (const tag of html.matchAll(/<a\b[^>]*>/gi)) {
+    const atributos = lerAtributos(tag[0]);
+    const href = atributos.get('href') || '';
+    const contexto = [
+      atributos.get('class'), atributos.get('id'), atributos.get('rel'),
+      atributos.get('data-fancybox'), atributos.get('data-gallery'), atributos.get('aria-label'),
+    ].filter(Boolean).join(' ');
+    if (/(?:gallery|galeria|product|produto|image|imagem|zoom|lightbox|swiper|slick|fancybox)/i.test(contexto) ||
+        /\.(?:avif|webp|png|jpe?g)(?:[?#]|$)/i.test(href)) adicionar(href, 'ZOOM', contexto);
+  }
+
+  for (const casa of html.matchAll(/["'](?:zoom|zoomImage|large|largeImage|full|fullImage|original|originalSrc|master|imageUrl|image_url)["']\s*:\s*["']([^"']+)["']/gi)) adicionar(casa[1], 'ZOOM');
+  return candidatas.sort((a, b) => b.pontuacao - a.pontuacao).slice(0, 80);
 }
 
 async function lerCorpoLimitado(resposta: Response, limite: number) {
@@ -263,6 +302,9 @@ function dimensoesImagem(bytes: Uint8Array): { largura: number; altura: number }
 }
 
 async function verificarImagem(candidata: CandidataImagem): Promise<ImagemVerificada | null> {
+  if (candidata.largura && candidata.altura) {
+    return { ...candidata, largura: candidata.largura, altura: candidata.altura };
+  }
   try {
     const resposta = await fetchSeguro(candidata.url, {
       headers: {
@@ -281,8 +323,14 @@ async function verificarImagem(candidata: CandidataImagem): Promise<ImagemVerifi
 
 const tamanhoAceitavel = (imagem: CandidataImagem) => Boolean(
   imagem.largura && imagem.altura &&
-  imagem.largura * imagem.altura >= 250_000 &&
-  Math.max(imagem.largura, imagem.altura) >= 600
+  imagem.largura * imagem.altura >= AREA_MINIMA &&
+  Math.max(imagem.largura, imagem.altura) >= MAIOR_LADO_MINIMO
+);
+
+const tamanhoPreferido = (imagem: CandidataImagem) => Boolean(
+  imagem.largura && imagem.altura &&
+  imagem.largura * imagem.altura >= AREA_PREFERIDA &&
+  Math.max(imagem.largura, imagem.altura) >= MAIOR_LADO_PREFERIDO
 );
 
 const chaveVisual = (url: string) => {
@@ -299,16 +347,24 @@ async function selecionarImagens(candidatas: CandidataImagem[]) {
     const anterior = porUrl.get(candidata.url);
     if (!anterior || candidata.pontuacao > anterior.pontuacao) porUrl.set(candidata.url, candidata);
   }
-  const paraVerificar = [...porUrl.values()]
-    .filter(item => !pareceDecorativa(item.url) && !pareceMiniatura(item.url))
-    .sort((a, b) => b.pontuacao - a.pontuacao)
-    .slice(0, MAX_CANDIDATAS_VERIFICADAS);
+  const ordenadas = [...porUrl.values()]
+    .filter(item => !pareceDecorativa(item.url))
+    .sort((a, b) => b.pontuacao - a.pontuacao);
+  const comDimensoes = ordenadas.filter(item => item.largura && item.altura && tamanhoAceitavel(item));
+  const semDimensoes = ordenadas.filter(item => !item.largura || !item.altura);
+  const paraVerificar = [
+    ...comDimensoes.slice(0, 20),
+    ...semDimensoes.slice(0, Math.max(0, MAX_CANDIDATAS_VERIFICADAS - Math.min(20, comDimensoes.length))),
+  ];
   const verificadas = (await Promise.all(paraVerificar.map(verificarImagem)))
     .filter((item): item is ImagemVerificada => Boolean(item && tamanhoAceitavel(item)))
     .sort((a, b) => {
       const areaA = (a.largura || 0) * (a.altura || 0);
       const areaB = (b.largura || 0) * (b.altura || 0);
-      return (b.pontuacao + Math.min(areaB / 100_000, 30)) - (a.pontuacao + Math.min(areaA / 100_000, 30));
+      const preferenciaA = tamanhoPreferido(a) ? 100 : 0;
+      const preferenciaB = tamanhoPreferido(b) ? 100 : 0;
+      return (preferenciaB + b.pontuacao + Math.min(areaB / 100_000, 30)) -
+        (preferenciaA + a.pontuacao + Math.min(areaA / 100_000, 30));
     });
 
   const escolhidas = new Map<string, CandidataImagem>();
@@ -319,7 +375,7 @@ async function selecionarImagens(candidatas: CandidataImagem[]) {
     const areaAnterior = (anterior?.largura || 0) * (anterior?.altura || 0);
     if (!anterior || area > areaAnterior) escolhidas.set(chave, imagem);
   }
-  return [...escolhidas.values()].slice(0, 24).map((imagem): ImagemPesquisada => ({
+  const imagens = [...escolhidas.values()].slice(0, 24).map((imagem): ImagemPesquisada => ({
     url: imagem.url,
     paginaOrigem: imagem.paginaOrigem,
     largura: imagem.largura,
@@ -328,6 +384,16 @@ async function selecionarImagens(candidatas: CandidataImagem[]) {
     metodo: imagem.metodo,
     qualidade: (imagem.largura || 0) * (imagem.altura || 0) >= 1_000_000 ? 'ALTA' : 'BOA',
   }));
+  return {
+    imagens,
+    diagnostico: {
+      candidatasRecebidas: candidatas.length,
+      candidatasUnicas: porUrl.size,
+      candidatasVerificadas: paraVerificar.length,
+      comDimensoesDoSerper: paraVerificar.filter(item => item.largura && item.altura).length,
+      aprovadas: imagens.length,
+    },
+  };
 }
 
 async function lerPagina(url: string, termo: string) {
@@ -358,10 +424,9 @@ export async function pesquisarEspecificacoes(nome: string, chave: string): Prom
 }
 
 export async function buscarImagensComGaleria(termo: string, chave: string) {
-  const dados = await chamarSerper('images', { q: termo, gl: 'br', hl: 'pt-br', num: 12 }, chave);
+  const dados = await chamarSerper('images', { q: termo, gl: 'br', hl: 'pt-br', num: 20 }, chave);
   const itens: ItemSerper[] = Array.isArray(dados.images) ? dados.images : [];
-  const paginasCandidatas = [...new Set<string>(itens.map(item => String(item.link || item.sourceUrl || '')).filter(url => /^https?:\/\//i.test(url)))].slice(0, 4);
-  const paginasLidas = (await Promise.all(paginasCandidatas.map(url => lerPagina(url, termo)))).filter((pagina): pagina is NonNullable<typeof pagina> => Boolean(pagina));
+  const paginasCandidatas = [...new Set<string>(itens.map(item => String(item.link || item.sourceUrl || '')).filter(url => /^https?:\/\//i.test(url)))].slice(0, 6);
   const diretas: CandidataImagem[] = itens.map((item): CandidataImagem => ({
     url: String(item.imageUrl || ''),
     paginaOrigem: String(item.link || item.sourceUrl || ''),
@@ -371,10 +436,57 @@ export async function buscarImagensComGaleria(termo: string, chave: string) {
     metodo: 'SERPER',
     pontuacao: 60 - (pareceMiniatura(String(item.imageUrl || '')) ? 90 : 0),
   })).filter(item => /^https?:\/\//i.test(item.url));
-  const detalhes = await selecionarImagens([...paginasLidas.flatMap(pagina => pagina.imagens), ...diretas]);
+
+  const primeiraPagina = paginasCandidatas[0] ? await lerPagina(paginasCandidatas[0], termo) : null;
+  const paginasLidas = primeiraPagina ? [primeiraPagina] : [];
+  if (primeiraPagina) {
+    const galeriaPrincipal = await selecionarImagens(primeiraPagina.imagens);
+    if (galeriaPrincipal.imagens.length >= 4) {
+      return {
+        urls: galeriaPrincipal.imagens.map(imagem => imagem.url),
+        detalhes: galeriaPrincipal.imagens,
+        diagnostico: {
+          ...galeriaPrincipal.diagnostico,
+          modo: 'GALERIA_UNICA',
+          paginaGaleria: primeiraPagina.url,
+        },
+        paginas: paginasCandidatas,
+        paginasAbertas: 1,
+        resultados: itens.length,
+      };
+    }
+  }
+
+  const paginasRestantes = (await Promise.all(
+    paginasCandidatas.slice(1).map(url => lerPagina(url, termo))
+  )).filter((pagina): pagina is NonNullable<typeof pagina> => Boolean(pagina));
+  paginasLidas.push(...paginasRestantes);
+  const galeriasRestantes = await Promise.all(
+    paginasRestantes.map(pagina => selecionarImagens(pagina.imagens))
+  );
+  const indiceGaleriaCompleta = galeriasRestantes.findIndex(galeria => galeria.imagens.length >= 4);
+  if (indiceGaleriaCompleta >= 0) {
+    const galeria = galeriasRestantes[indiceGaleriaCompleta];
+    const pagina = paginasRestantes[indiceGaleriaCompleta];
+    return {
+      urls: galeria.imagens.map(imagem => imagem.url),
+      detalhes: galeria.imagens,
+      diagnostico: {
+        ...galeria.diagnostico,
+        modo: 'GALERIA_UNICA',
+        paginaGaleria: pagina.url,
+      },
+      paginas: paginasCandidatas,
+      paginasAbertas: paginasLidas.length,
+      resultados: itens.length,
+    };
+  }
+
+  const selecao = await selecionarImagens([...paginasLidas.flatMap(pagina => pagina.imagens), ...diretas]);
   return {
-    urls: detalhes.map(imagem => imagem.url),
-    detalhes,
+    urls: selecao.imagens.map(imagem => imagem.url),
+    detalhes: selecao.imagens,
+    diagnostico: { ...selecao.diagnostico, modo: 'COMBINADO', paginaGaleria: null },
     paginas: paginasCandidatas,
     paginasAbertas: paginasLidas.length,
     resultados: itens.length,

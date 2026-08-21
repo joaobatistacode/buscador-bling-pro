@@ -44,6 +44,7 @@ async function buscarImagensSerper(termo: string, chaveSerper: string, debug: an
       paginasEncontradas: dados.paginas.length,
       paginasAbertas: dados.paginasAbertas,
       imagensComResolucaoAprovada: dados.urls.length,
+      diagnostico: dados.diagnostico,
     });
     return { urls: dados.urls, detalhes: dados.detalhes };
   } catch (e: any) {
