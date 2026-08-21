@@ -105,7 +105,7 @@ export function DashboardView({ geminiConfigurado, serperConfigurado }: { gemini
           <div>
             <p className="text-xs font-black uppercase tracking-[.24em] text-cyan-300">Central de operação</p>
             <h2 className="mt-3 max-w-2xl text-3xl font-black tracking-tight md:text-4xl">Seu catálogo, do trabalho pendente ao produto publicado.</h2>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">Atualize os totais gerais e acompanhe automaticamente a qualidade dos produtos enviados pelo sistema.</p>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">Defina a base geral uma vez. Depois, cada novo envio concluído atualiza automaticamente os totais e a qualidade do catálogo.</p>
             <div className="mt-6 flex flex-wrap gap-3">
               <button type="button" onClick={() => setEditando(valor => !valor)} className="rounded-xl bg-cyan-300 px-4 py-2.5 text-sm font-black text-[#071a24] transition hover:bg-cyan-200">{editando ? 'Fechar edição' : 'Atualizar quantidades'}</button>
               {dados.operacao.atualizadoEm ? <span className="self-center text-xs text-slate-400">Atualizado em {new Date(dados.operacao.atualizadoEm).toLocaleString('pt-BR')}</span> : null}
@@ -131,9 +131,9 @@ export function DashboardView({ geminiConfigurado, serperConfigurado }: { gemini
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          ['Enviados', dados.operacao.enviados, 'total informado por você', 'text-emerald-600', 'bg-emerald-50'],
-          ['Ainda faltam', dados.operacao.pendentes, 'total informado por você', 'text-orange-600', 'bg-orange-50'],
-          ['Na revisão atual', dados.historico.aguardandoRevisao, `${dados.historico.total} registrados no histórico`, 'text-blue-600', 'bg-blue-50'],
+          ['Enviados', dados.operacao.enviados, 'base manual + novos envios', 'text-emerald-600', 'bg-emerald-50'],
+          ['Ainda faltam', dados.operacao.pendentes, 'diminui após cada novo envio', 'text-orange-600', 'bg-orange-50'],
+          ['Na revisão atual', dados.historico.aguardandoRevisao, 'produtos ainda não enviados', 'text-blue-600', 'bg-blue-50'],
           ['Tarefas abertas', dados.tarefas.pendentes, `${dados.tarefas.concluidas} já concluídas`, 'text-violet-600', 'bg-violet-50'],
         ].map(([rotulo, valor, detalhe, cor, fundo]) => <div key={String(rotulo)} className={`${classeCartao} relative overflow-hidden`}><span className={`absolute right-4 top-4 h-3 w-3 rounded-full ${fundo} ring-4 ring-current/5`} /><p className="text-sm font-bold text-slate-500">{rotulo}</p><p className={`mt-3 text-4xl font-black ${cor}`}>{numero.format(Number(valor))}</p><p className="mt-2 text-xs leading-5 text-slate-500">{detalhe}</p></div>)}
       </div>
