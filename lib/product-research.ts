@@ -119,6 +119,107 @@ const tokensProduto = (termo: string) => termo
   .toLowerCase().split(/[^a-z0-9]+/)
   .filter(token => token.length >= 3 && !['com', 'sem', 'para', 'produto', 'site'].includes(token));
 
+const normalizarReferencia = (valor: string) => valor
+  .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  .toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+
+export function referenciasCriticasProduto(termo: string) {
+  const semFrequencias = normalizarReferencia(termo)
+    .replace(/\b\d+(?:\s+\d+)?(?:KHZ|MHZ|GHZ|HZ)\b/g, ' ');
+  const palavras = semFrequencias.split(' ').filter(Boolean);
+  const unidades = new Set([
+    'HZ', 'KHZ', 'MHZ', 'GHZ', 'MM', 'CM', 'M', 'G', 'KG', 'ML', 'L', 'V', 'W', 'UN',
+    'COM', 'SEM', 'POR', 'PARA', 'COR',
+  ]);
+  const referencias = new Set<string>();
+
+  palavras.forEach((palavra, indice) => {
+    if (!/\d/.test(palavra)) return;
+    referencias.add(palavra);
+    for (const vizinho of [palavras[indice - 1], palavras[indice + 1]]) {
+      if (vizinho && /^[A-Z]{1,3}$/.test(vizinho) && !unidades.has(vizinho)) referencias.add(vizinho);
+    }
+  });
+
+  return palavras.filter((palavra, indice) => referencias.has(palavra) && palavras.indexOf(palavra) === indice);
+}
+
+export function referenciaCompativel(texto: string, termo: string) {
+  const referencias = referenciasCriticasProduto(termo);
+  if (!referencias.length) return true;
+  const normalizado = normalizarReferencia(texto);
+  const palavras = new Set(normalizado.split(' ').filter(Boolean));
+  const compacto = normalizado.replace(/\s+/g, '');
+  const numericas = referencias.filter(referencia => /\d/.test(referencia));
+  return referencias.every(referencia => {
+    if (palavras.has(referencia)) return true;
+    if (/^[A-Z]{1,3}$/.test(referencia)) {
+      return numericas.some(numero =>
+        compacto.includes(`${referencia}${numero}`) || compacto.includes(`${numero}${referencia}`)
+      );
+    }
+    return compacto.includes(referencia);
+  });
+}
+
+const normalizarBuscaImagem = (nome: string) => nome
+  .replace(/\bENCORD\b/gi, 'ENCORDOAMENTO')
+  .replace(/\bS\/\s*FIO\b/gi, 'SEM FIO')
+  .replace(/\bC\/\s*/gi, 'COM ')
+  .replace(/\bS\/\s*/gi, 'SEM ')
+  .replace(/\bVERM\b/gi, 'VERMELHO')
+  .replace(/\bPTO\b/gi, 'PRETO')
+  .replace(/\bBCO\b/gi, 'BRANCO')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+export const montarTermosImagem = (nome: string, sites: string[], limite: number): string[] => {
+  const busca = normalizarBuscaImagem(nome);
+  const palavras = busca.split(' ').filter(Boolean);
+  const genericas = new Set([
+    'MOUSE', 'SEM', 'FIO', 'COM', 'PARA', 'WIN', 'WINDOWS', 'GHZ', '2.4GHZ',
+    'ALCANCE', 'METROS', 'METRO', 'UN', 'UNIDADE',
+  ]);
+  const referencias = referenciasCriticasProduto(busca);
+  const conjuntoReferencias = new Set(referencias);
+  const distintivas = palavras.filter(palavra =>
+    conjuntoReferencias.has(normalizarReferencia(palavra)) ||
+    (palavra.length > 2 && !genericas.has(palavra.toUpperCase()) && !/^\d+M$/i.test(palavra))
+  );
+  const termoPrincipal = distintivas.length >= 2 ? distintivas.join(' ') : busca;
+  const referenciasObrigatorias = referencias.map(referencia => `"${referencia}"`).join(' ');
+  const demaisTermos = distintivas.filter(palavra => !conjuntoReferencias.has(normalizarReferencia(palavra)));
+  const termoComReferencias = [demaisTermos.join(' '), referenciasObrigatorias].filter(Boolean).join(' ');
+
+  const genericos = [termoComReferencias || termoPrincipal, busca, `${referenciasObrigatorias} ${termoPrincipal}`];
+  const consultasDeSites = sites.map(site => `${termoComReferencias || termoPrincipal} site:${site}`);
+  const consultas = sites.length > 0 && limite > 1
+    ? [...consultasDeSites.slice(0, limite - 1), ...genericos]
+    : [...consultasDeSites, ...genericos];
+
+  return [...new Set(consultas.map(termo => termo.trim()).filter(Boolean))].slice(0, limite);
+};
+
+export function identificacaoPagina(html: string, pagina: string) {
+  const partes = [pagina];
+  for (const item of html.matchAll(/<(?:title|h1)\b[^>]*>([\s\S]*?)<\/(?:title|h1)>/gi)) {
+    partes.push(limpar(item[1]).slice(0, 500));
+    if (partes.length >= 6) break;
+  }
+  for (const tag of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const atributos = lerAtributos(tag[0]);
+    const tipo = `${atributos.get('property') || ''} ${atributos.get('name') || ''}`;
+    if (/(?:og:title|twitter:title|product:retailer_item_id|product:sku)/i.test(tipo)) {
+      partes.push((atributos.get('content') || '').slice(0, 500));
+    }
+  }
+  for (const item of html.matchAll(/["'](?:name|sku|mpn|model|productName|product_name)["']\s*:\s*["']([^"']+)["']/gi)) {
+    partes.push(decodificarHtml(item[1]).slice(0, 500));
+    if (partes.length >= 16) break;
+  }
+  return partes.join(' ');
+}
+
 const pareceDecorativa = (url: string) => /(?:^|[\/_\-.])(logo|icon|icone|sprite|banner|pixel|avatar|placeholder|loading|favicon)(?:[\/_\-.]|$)/i.test(url);
 const pareceMiniatura = (url: string) =>
   /(?:^|[\/_\-.])(?:thumb|thumbnail|miniatura|small|tiny|lowres|_xs|_sm)(?:[\/_\-.]|$)/i.test(url) ||
@@ -402,7 +503,13 @@ async function lerPagina(url: string, termo: string) {
     if (!resposta.ok || !String(resposta.headers.get('content-type')).includes('text/html')) return null;
     const html = new TextDecoder('utf-8', { fatal: false }).decode(await lerCorpoLimitado(resposta, MAX_HTML));
     const paginaFinal = resposta.url || url;
-    return { texto: limpar(html).slice(0, 12_000), imagens: extrairImagens(html, paginaFinal, termo), url: paginaFinal };
+    const texto = limpar(html);
+    return {
+      texto: texto.slice(0, 12_000),
+      imagens: extrairImagens(html, paginaFinal, termo),
+      url: paginaFinal,
+      referenciaConfirmada: referenciaCompativel(identificacaoPagina(html, paginaFinal), termo),
+    };
   } catch { return null; }
 }
 
@@ -423,11 +530,14 @@ export async function pesquisarEspecificacoes(nome: string, chave: string): Prom
   } catch { return []; }
 }
 
-export async function buscarImagensComGaleria(termo: string, chave: string) {
+export async function buscarImagensComGaleria(termo: string, chave: string, referenciaProduto = termo) {
   const dados = await chamarSerper('images', { q: termo, gl: 'br', hl: 'pt-br', num: 20 }, chave);
   const itens: ItemSerper[] = Array.isArray(dados.images) ? dados.images : [];
   const paginasCandidatas = [...new Set<string>(itens.map(item => String(item.link || item.sourceUrl || '')).filter(url => /^https?:\/\//i.test(url)))].slice(0, 6);
-  const diretas: CandidataImagem[] = itens.map((item): CandidataImagem => ({
+  const diretas: CandidataImagem[] = itens.filter(item => referenciaCompativel(
+    `${String(item.title || '')} ${String(item.snippet || '')} ${String(item.link || item.sourceUrl || '')}`,
+    referenciaProduto
+  )).map((item): CandidataImagem => ({
     url: String(item.imageUrl || ''),
     paginaOrigem: String(item.link || item.sourceUrl || ''),
     largura: Number(item.imageWidth) > 0 ? Number(item.imageWidth) : null,
@@ -437,7 +547,8 @@ export async function buscarImagensComGaleria(termo: string, chave: string) {
     pontuacao: 60 - (pareceMiniatura(String(item.imageUrl || '')) ? 90 : 0),
   })).filter(item => /^https?:\/\//i.test(item.url));
 
-  const primeiraPagina = paginasCandidatas[0] ? await lerPagina(paginasCandidatas[0], termo) : null;
+  const primeiraPaginaLida = paginasCandidatas[0] ? await lerPagina(paginasCandidatas[0], referenciaProduto) : null;
+  const primeiraPagina = primeiraPaginaLida?.referenciaConfirmada ? primeiraPaginaLida : null;
   const paginasLidas = primeiraPagina ? [primeiraPagina] : [];
   if (primeiraPagina) {
     const galeriaPrincipal = await selecionarImagens(primeiraPagina.imagens);
@@ -449,6 +560,7 @@ export async function buscarImagensComGaleria(termo: string, chave: string) {
           ...galeriaPrincipal.diagnostico,
           modo: 'GALERIA_UNICA',
           paginaGaleria: primeiraPagina.url,
+          paginasDescartadasReferencia: 0,
         },
         paginas: paginasCandidatas,
         paginasAbertas: 1,
@@ -457,9 +569,10 @@ export async function buscarImagensComGaleria(termo: string, chave: string) {
     }
   }
 
-  const paginasRestantes = (await Promise.all(
-    paginasCandidatas.slice(1).map(url => lerPagina(url, termo))
+  const paginasRestantesLidas = (await Promise.all(
+    paginasCandidatas.slice(1).map(url => lerPagina(url, referenciaProduto))
   )).filter((pagina): pagina is NonNullable<typeof pagina> => Boolean(pagina));
+  const paginasRestantes = paginasRestantesLidas.filter(pagina => pagina.referenciaConfirmada);
   paginasLidas.push(...paginasRestantes);
   const galeriasRestantes = await Promise.all(
     paginasRestantes.map(pagina => selecionarImagens(pagina.imagens))
@@ -475,9 +588,11 @@ export async function buscarImagensComGaleria(termo: string, chave: string) {
         ...galeria.diagnostico,
         modo: 'GALERIA_UNICA',
         paginaGaleria: pagina.url,
+        paginasDescartadasReferencia: Number(Boolean(primeiraPaginaLida && !primeiraPagina)) +
+          paginasRestantesLidas.filter(item => !item.referenciaConfirmada).length,
       },
       paginas: paginasCandidatas,
-      paginasAbertas: paginasLidas.length,
+      paginasAbertas: Number(Boolean(primeiraPaginaLida)) + paginasRestantesLidas.length,
       resultados: itens.length,
     };
   }
@@ -486,9 +601,15 @@ export async function buscarImagensComGaleria(termo: string, chave: string) {
   return {
     urls: selecao.imagens.map(imagem => imagem.url),
     detalhes: selecao.imagens,
-    diagnostico: { ...selecao.diagnostico, modo: 'COMBINADO', paginaGaleria: null },
+    diagnostico: {
+      ...selecao.diagnostico,
+      modo: 'COMBINADO',
+      paginaGaleria: null,
+      paginasDescartadasReferencia: Number(Boolean(primeiraPaginaLida && !primeiraPagina)) +
+        paginasRestantesLidas.filter(item => !item.referenciaConfirmada).length,
+    },
     paginas: paginasCandidatas,
-    paginasAbertas: paginasLidas.length,
+    paginasAbertas: Number(Boolean(primeiraPaginaLida)) + paginasRestantesLidas.length,
     resultados: itens.length,
   };
 }

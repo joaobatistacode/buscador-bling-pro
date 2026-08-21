@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { lerCorpoLimitado, naoAutorizado, origemInvalida, origemPermitida, temAcesso } from '@/lib/acesso';
-import { buscarImagensComGaleria, pesquisarEspecificacoes, type FonteProduto, type ImagemPesquisada } from '@/lib/product-research';
+import { buscarImagensComGaleria, montarTermosImagem, pesquisarEspecificacoes, type FonteProduto, type ImagemPesquisada } from '@/lib/product-research';
 
 // Modelo "lite": cota gratuita bem maior que o flash normal, o que importa em lotes grandes.
 const MODELO_GEMINI = 'gemini-flash-lite-latest';
@@ -35,9 +35,9 @@ function limparHtml(texto: string): string {
 // Busca de imagens via Serper (resultados do Google Imagens).
 // O Mercado Livre bloqueia acesso anônimo e a Custom Search JSON API do Google
 // foi fechada para novos projetos, então esta é a fonte que resta funcionando.
-async function buscarImagensSerper(termo: string, chaveSerper: string, debug: any[]) {
+async function buscarImagensSerper(termo: string, chaveSerper: string, debug: any[], referenciaProduto: string) {
   try {
-    const dados = await buscarImagensComGaleria(termo, chaveSerper);
+    const dados = await buscarImagensComGaleria(termo, chaveSerper, referenciaProduto);
     debug.push({
       termo,
       resultados: dados.resultados,
@@ -53,17 +53,6 @@ async function buscarImagensSerper(termo: string, chaveSerper: string, debug: an
   return { urls: [] as string[], detalhes: [] as ImagemPesquisada[] };
 }
 
-const normalizarBuscaImagem = (nome: string) => nome
-  .replace(/\bENCORD\b/gi, 'ENCORDOAMENTO')
-  .replace(/\bS\/\s*FIO\b/gi, 'SEM FIO')
-  .replace(/\bC\/\s*/gi, 'COM ')
-  .replace(/\bS\/\s*/gi, 'SEM ')
-  .replace(/\bVERM\b/gi, 'VERMELHO')
-  .replace(/\bPTO\b/gi, 'PRETO')
-  .replace(/\bBCO\b/gi, 'BRANCO')
-  .replace(/\s+/g, ' ')
-  .trim();
-
 const prepararSitesPreferenciais = (valor: unknown): string[] => {
   if (!Array.isArray(valor)) return [];
 
@@ -72,27 +61,6 @@ const prepararSitesPreferenciais = (valor: unknown): string[] => {
     .map(site => site.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0])
     .filter(site => /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/i.test(site))
   )].slice(0, 12);
-};
-
-const montarTermosImagem = (nome: string, sites: string[], limite: number): string[] => {
-  const busca = normalizarBuscaImagem(nome);
-  const palavras = busca.split(' ').filter(Boolean);
-  const genericas = new Set([
-    'MOUSE', 'SEM', 'FIO', 'COM', 'PARA', 'WIN', 'WINDOWS', 'GHZ', '2.4GHZ',
-    'ALCANCE', 'METROS', 'METRO', 'UN', 'UNIDADE',
-  ]);
-  const distintivas = palavras.filter(palavra =>
-    palavra.length > 2 && !genericas.has(palavra.toUpperCase()) && !/^\d+M$/i.test(palavra)
-  );
-  const termoPrincipal = distintivas.length >= 2 ? distintivas.join(' ') : busca;
-
-  const genericos = [termoPrincipal, busca, palavras.slice(-5).join(' ')];
-  const consultasDeSites = sites.map(site => `${termoPrincipal} site:${site}`);
-  const consultas = sites.length > 0 && limite > 1
-    ? [...consultasDeSites.slice(0, limite - 1), ...genericos]
-    : [...consultasDeSites, ...genericos];
-
-  return [...new Set(consultas.map(termo => termo.trim()).filter(Boolean))].slice(0, limite);
 };
 
 export interface Ficha {
@@ -374,7 +342,7 @@ export async function POST(request: Request) {
     } else if (apiKeyImg) {
       for (const tentativa of tentativas) {
         if (!tentativa.trim()) continue;
-        const pesquisa = await buscarImagensSerper(tentativa, apiKeyImg.trim(), debugImg);
+        const pesquisa = await buscarImagensSerper(tentativa, apiKeyImg.trim(), debugImg, String(nome || ''));
         for (const url of pesquisa.urls) {
           if (!imagensEncontradas.includes(url)) {
             imagensEncontradas.push(url);
