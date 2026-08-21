@@ -356,6 +356,25 @@ export default function Home() {
 
     if (!simular) {
       const enviados = new Set(saidas.filter(s => s.enviado).map(s => s.codigo));
+      if (enviados.size > 0) {
+        try {
+          const respostaContadores = await fetch('/api/dashboard/registrar-envios', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ codigos: Array.from(enviados) }),
+          });
+          const dadosContadores = await respostaContadores.json().catch(() => ({}));
+          if (!respostaContadores.ok) {
+            throw new Error(dadosContadores.erro || `HTTP ${respostaContadores.status}`);
+          }
+        } catch (erro) {
+          setAviso(
+            `Os produtos foram enviados ao Bling, mas os contadores do painel não foram atualizados — ${
+              erro instanceof Error ? erro.message : 'falha de rede'
+            }`
+          );
+        }
+      }
       const atualizados = resultados.map(produto => enviados.has(produto.codigo)
         ? { ...produto, enviadoBling: true, enviadoEm: new Date().toISOString() }
         : produto);

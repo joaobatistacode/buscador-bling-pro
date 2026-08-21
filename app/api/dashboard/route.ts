@@ -54,6 +54,7 @@ export async function GET() {
     const linhasTarefas = tarefas as Array<{ status?: string }>;
     const enviadosHistorico = linhasProdutos.filter(produto => produto.status === 'ENVIADO');
     const revisados = linhasProdutos.filter(produto => produto.revisado).length;
+    const aguardandoRevisao = linhasProdutos.filter(produto => produto.status !== 'ENVIADO' && !produto.revisado).length;
     const reais = linhasProdutos.filter(produto => produto.origem_medidas === 'REAL').length;
     const tarefasPendentes = linhasTarefas.filter(tarefa => tarefa.status !== 'CONCLUIDA').length;
     const fotos = { 4: 0, 3: 0, 2: 0, 1: 0, 0: 0 } as Record<0 | 1 | 2 | 3 | 4, number>;
@@ -75,7 +76,7 @@ export async function GET() {
         total: linhasProdutos.length,
         enviados: enviadosHistorico.length,
         revisados,
-        aguardandoRevisao: Math.max(0, linhasProdutos.length - revisados),
+        aguardandoRevisao,
         medidasReais: reais,
         medidasEstimadas: linhasProdutos.length - reais,
       },
