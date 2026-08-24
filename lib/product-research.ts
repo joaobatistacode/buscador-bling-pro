@@ -129,16 +129,25 @@ export function referenciasCriticasProduto(termo: string) {
   const palavras = semFrequencias.split(' ').filter(Boolean);
   const unidades = new Set([
     'HZ', 'KHZ', 'MHZ', 'GHZ', 'MM', 'CM', 'M', 'G', 'KG', 'ML', 'L', 'V', 'W', 'UN',
-    'COM', 'SEM', 'POR', 'PARA', 'COR',
+    'UND', 'PC', 'PCT', 'CX', 'CJ', 'KIT', 'COM', 'SEM', 'POR', 'PARA', 'COR',
+  ]);
+  const sufixosCor = new Set([
+    'PT', 'PTO', 'BR', 'BCO', 'CZ', 'CZA', 'PR', 'VM', 'AZ', 'AZL', 'VD', 'AM', 'AMA',
+    'LR', 'LJA', 'RS', 'RSA', 'RX', 'MR', 'MRM', 'BEG', 'DOU', 'CH', 'TR',
   ]);
   const referencias = new Set<string>();
 
   palavras.forEach((palavra, indice) => {
     if (!/\d/.test(palavra)) return;
     referencias.add(palavra);
-    for (const vizinho of [palavras[indice - 1], palavras[indice + 1]]) {
-      if (vizinho && /^[A-Z]{1,3}$/.test(vizinho) && !unidades.has(vizinho)) referencias.add(vizinho);
-    }
+    const anterior = palavras[indice - 1];
+    const proximo = palavras[indice + 1];
+    // Prefixos antes do número continuam protegidos: PT-467, EP 02, TH-101.
+    if (anterior && /^[A-Z]{1,3}$/.test(anterior) && !unidades.has(anterior)) referencias.add(anterior);
+    // Depois do número, abreviações de cor descrevem a variação e não o modelo.
+    // Ex.: TH-101 PT deve aceitar páginas cujo título contenha apenas TH-101.
+    if (proximo && /^[A-Z]{1,3}$/.test(proximo) &&
+        !unidades.has(proximo) && !sufixosCor.has(proximo)) referencias.add(proximo);
   });
 
   return palavras.filter((palavra, indice) => referencias.has(palavra) && palavras.indexOf(palavra) === indice);
