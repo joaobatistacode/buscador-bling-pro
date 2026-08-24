@@ -124,12 +124,22 @@ const normalizarReferencia = (valor: string) => valor
   .toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 
 export function referenciasCriticasProduto(termo: string) {
-  const semFrequencias = normalizarReferencia(termo)
-    .replace(/\b\d+(?:\s+\d+)?(?:KHZ|MHZ|GHZ|HZ)\b/g, ' ');
-  const palavras = semFrequencias.split(' ').filter(Boolean);
-  const unidades = new Set([
+  // Frações e decimais normalmente representam tamanho, quantidade ou versão
+  // comercial (2 1/2, 2,5, 2½), não o código que identifica o produto.
+  const semFracoes = termo
+    .replace(/\b\d+\s+\d+\s*\/\s*\d+\b/g, ' ')
+    .replace(/\b\d+\s*\/\s*\d+\b/g, ' ')
+    .replace(/\b\d+[.,]\d+\b/g, ' ')
+    .replace(/\b\d+\s*[¼½¾]\b/g, ' ');
+  const semMedidas = normalizarReferencia(semFracoes)
+    .replace(/\b\d+(?:KHZ|MHZ|GHZ|HZ|MM|CM|KG|MG|ML|V|W)\b/g, ' ')
+    .replace(/\b\d+\s+(?:KHZ|MHZ|GHZ|HZ|MM|CM|KG|MG|ML|V|W)\b/g, ' ');
+  const palavras = semMedidas.split(' ').filter(Boolean);
+  const descritoresNumericos = new Set([
     'HZ', 'KHZ', 'MHZ', 'GHZ', 'MM', 'CM', 'M', 'G', 'KG', 'ML', 'L', 'V', 'W', 'UN',
-    'UND', 'PC', 'PCT', 'CX', 'CJ', 'KIT', 'COM', 'SEM', 'POR', 'PARA', 'COR',
+    'UND', 'PC', 'PCT', 'CX', 'CJ', 'KIT', 'COM', 'SEM', 'POR', 'PARA', 'COR', 'PAR',
+    'JOGO', 'SOM', 'CANAL', 'CANAIS', 'VIA', 'VIAS', 'POLO', 'POLOS', 'PINO', 'PINOS',
+    'AA', 'AAA', 'MIB', 'SIB', 'LAB', 'REB', 'SOLB', 'EB', 'BB', 'AB', 'DB', 'GB',
   ]);
   const sufixosCor = new Set([
     'PT', 'PTO', 'BR', 'BCO', 'CZ', 'CZA', 'PR', 'VM', 'AZ', 'AZL', 'VD', 'AM', 'AMA',
@@ -139,15 +149,29 @@ export function referenciasCriticasProduto(termo: string) {
 
   palavras.forEach((palavra, indice) => {
     if (!/\d/.test(palavra)) return;
-    referencias.add(palavra);
+    const temLetras = /[A-Z]/.test(palavra);
+    if (temLetras) {
+      // Códigos alfanuméricos já carregam identidade suficiente: SR2125,
+      // M170, AC1200, A15. Palavras vizinhas são apenas descritores.
+      referencias.add(palavra);
+      return;
+    }
+
     const anterior = palavras[indice - 1];
     const proximo = palavras[indice + 1];
+    const prefixoAnterior = Boolean(
+      anterior && /^[A-Z]{1,3}$/.test(anterior) && !descritoresNumericos.has(anterior)
+    );
+    const prefixoPosterior = Boolean(
+      proximo && /^[A-Z]{1,3}$/.test(proximo) &&
+      !descritoresNumericos.has(proximo) && !sufixosCor.has(proximo)
+    );
+
+    if (prefixoAnterior || prefixoPosterior || palavra.length >= 3) referencias.add(palavra);
     // Prefixos antes do número continuam protegidos: PT-467, EP 02, TH-101.
-    if (anterior && /^[A-Z]{1,3}$/.test(anterior) && !unidades.has(anterior)) referencias.add(anterior);
-    // Depois do número, abreviações de cor descrevem a variação e não o modelo.
-    // Ex.: TH-101 PT deve aceitar páginas cujo título contenha apenas TH-101.
-    if (proximo && /^[A-Z]{1,3}$/.test(proximo) &&
-        !unidades.has(proximo) && !sufixosCor.has(proximo)) referencias.add(proximo);
+    if (prefixoAnterior && anterior) referencias.add(anterior);
+    // A ordem invertida também é aceita, exceto quando o sufixo é cor/unidade.
+    if (prefixoPosterior && proximo) referencias.add(proximo);
   });
 
   return palavras.filter((palavra, indice) => referencias.has(palavra) && palavras.indexOf(palavra) === indice);
