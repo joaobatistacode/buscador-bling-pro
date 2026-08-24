@@ -35,9 +35,15 @@ function limparHtml(texto: string): string {
 // Busca de imagens via Serper (resultados do Google Imagens).
 // O Mercado Livre bloqueia acesso anônimo e a Custom Search JSON API do Google
 // foi fechada para novos projetos, então esta é a fonte que resta funcionando.
-async function buscarImagensSerper(termo: string, chaveSerper: string, debug: any[], referenciaProduto: string) {
+async function buscarImagensSerper(
+  termo: string,
+  chaveSerper: string,
+  debug: any[],
+  referenciaProduto: string,
+  permitirBuscaWeb = false
+) {
   try {
-    const dados = await buscarImagensComGaleria(termo, chaveSerper, referenciaProduto);
+    const dados = await buscarImagensComGaleria(termo, chaveSerper, referenciaProduto, permitirBuscaWeb);
     debug.push({
       termo,
       resultados: dados.resultados,
@@ -340,9 +346,15 @@ export async function POST(request: Request) {
         : "Busca de imagens não autorizada nesta requisição."
       });
     } else if (apiKeyImg) {
-      for (const tentativa of tentativas) {
+      for (const [indiceTentativa, tentativa] of tentativas.entries()) {
         if (!tentativa.trim()) continue;
-        const pesquisa = await buscarImagensSerper(tentativa, apiKeyImg.trim(), debugImg, String(nome || ''));
+        const pesquisa = await buscarImagensSerper(
+          tentativa,
+          apiKeyImg.trim(),
+          debugImg,
+          String(nome || ''),
+          indiceTentativa === 0
+        );
         for (const url of pesquisa.urls) {
           if (!imagensEncontradas.includes(url)) {
             imagensEncontradas.push(url);
