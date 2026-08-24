@@ -187,15 +187,19 @@ export const montarTermosImagem = (nome: string, sites: string[], limite: number
     (palavra.length > 2 && !genericas.has(palavra.toUpperCase()) && !/^\d+M$/i.test(palavra))
   );
   const termoPrincipal = distintivas.length >= 2 ? distintivas.join(' ') : busca;
-  const referenciasObrigatorias = referencias.map(referencia => `"${referencia}"`).join(' ');
-  const demaisTermos = distintivas.filter(palavra => !conjuntoReferencias.has(normalizarReferencia(palavra)));
-  const termoComReferencias = [demaisTermos.join(' '), referenciasObrigatorias].filter(Boolean).join(' ');
+  const termoEnxuto = distintivas
+    .filter(palavra =>
+      conjuntoReferencias.has(normalizarReferencia(palavra)) || palavra.length > 2 || /\d/.test(palavra)
+    )
+    .join(' ');
 
-  const genericos = [termoComReferencias || termoPrincipal, busca, `${referenciasObrigatorias} ${termoPrincipal}`];
-  const consultasDeSites = sites.map(site => `${termoComReferencias || termoPrincipal} site:${site}`);
-  const consultas = sites.length > 0 && limite > 1
-    ? [...consultasDeSites.slice(0, limite - 1), ...genericos]
-    : [...consultasDeSites, ...genericos];
+  // A consulta que o operador faria no Google deve ser sempre a primeira.
+  // Aspas em cada pedaço de uma referência composta (ex.: "PT" "467")
+  // reduzem demais o recall e não aceitam naturalmente PT467 / PT-467 / PT 467.
+  // A compatibilidade do modelo é conferida depois, nos resultados e na página.
+  const genericos = [busca, termoEnxuto || termoPrincipal];
+  const consultasDeSites = sites.map(site => `${termoEnxuto || termoPrincipal} site:${site}`);
+  const consultas = [...genericos, ...consultasDeSites];
 
   return [...new Set(consultas.map(termo => termo.trim()).filter(Boolean))].slice(0, limite);
 };
@@ -530,7 +534,12 @@ export async function pesquisarEspecificacoes(nome: string, chave: string): Prom
   } catch { return []; }
 }
 
-export async function buscarImagensComGaleria(termo: string, chave: string, referenciaProduto = termo) {
+export async function buscarImagensComGaleria(
+  termo: string,
+  chave: string,
+  referenciaProduto = termo,
+  permitirBuscaWeb = false
+) {
   const dados = await chamarSerper('images', { q: termo, gl: 'br', hl: 'pt-br', num: 20 }, chave);
   const itens: ItemSerper[] = Array.isArray(dados.images) ? dados.images : [];
   const paginasCandidatas = [...new Set<string>(itens.map(item => String(item.link || item.sourceUrl || '')).filter(url => /^https?:\/\//i.test(url)))].slice(0, 6);
@@ -597,7 +606,86 @@ export async function buscarImagensComGaleria(termo: string, chave: string, refe
     };
   }
 
-  const selecao = await selecionarImagens([...paginasLidas.flatMap(pagina => pagina.imagens), ...diretas]);
+  let selecao = await selecionarImagens([...paginasLidas.flatMap(pagina => pagina.imagens), ...diretas]);
+  let paginasWebAbertas = 0;
+  let paginasWebDescartadas = 0;
+  let paginasWebDescobertas: string[] = [];
+  let resultadosWeb = 0;
+  let falhaBuscaWeb = false;
+
+  // O Google comum pode encontrar a página correta mesmo quando a aba Imagens
+  // não a entrega ao Serper. Nesse caso, abrimos os resultados orgânicos e
+  // extraímos a galeria da página, mantendo a mesma validação de referência.
+  if (permitirBuscaWeb && selecao.imagens.length < 4 && !/\bsite:/i.test(termo)) {
+    try {
+      const dadosWeb = await chamarSerper('search', {
+        q: termo.replace(/"/g, ''), gl: 'br', hl: 'pt-br', num: 8,
+      }, chave);
+      const itensWeb: ItemSerper[] = [
+        ...(Array.isArray(dadosWeb.shopping) ? dadosWeb.shopping : []),
+        ...(Array.isArray(dadosWeb.organic) ? dadosWeb.organic : []),
+      ];
+      resultadosWeb = itensWeb.length;
+      paginasWebDescobertas = [...new Set<string>(itensWeb
+        .map(item => String(item.link || item.sourceUrl || ''))
+        .filter(url => /^https?:\/\//i.test(url) && !paginasCandidatas.includes(url))
+      )].slice(0, 6);
+      const paginasWebLidas = (await Promise.all(
+        paginasWebDescobertas.map(url => lerPagina(url, referenciaProduto))
+      )).filter((pagina): pagina is NonNullable<typeof pagina> => Boolean(pagina));
+      paginasWebAbertas = paginasWebLidas.length;
+      const paginasWebConfirmadas = paginasWebLidas.filter(pagina => pagina.referenciaConfirmada);
+      paginasWebDescartadas = paginasWebLidas.length - paginasWebConfirmadas.length;
+
+      for (const pagina of paginasWebConfirmadas) {
+        const galeria = await selecionarImagens(pagina.imagens);
+        if (galeria.imagens.length >= 4) {
+          return {
+            urls: galeria.imagens.map(imagem => imagem.url),
+            detalhes: galeria.imagens,
+            diagnostico: {
+              ...galeria.diagnostico,
+              modo: 'GALERIA_WEB',
+              paginaGaleria: pagina.url,
+              paginasDescartadasReferencia: Number(Boolean(primeiraPaginaLida && !primeiraPagina)) +
+                paginasRestantesLidas.filter(item => !item.referenciaConfirmada).length +
+                paginasWebDescartadas,
+              resultadosWeb,
+              paginasWebAbertas,
+            },
+            paginas: [...paginasCandidatas, ...paginasWebDescobertas],
+            paginasAbertas: Number(Boolean(primeiraPaginaLida)) + paginasRestantesLidas.length + paginasWebAbertas,
+            resultados: itens.length + resultadosWeb,
+          };
+        }
+      }
+
+      const diretasWeb: CandidataImagem[] = itensWeb.filter(item =>
+        referenciaCompativel(
+          `${String(item.title || '')} ${String(item.snippet || '')} ${String(item.link || item.sourceUrl || '')}`,
+          referenciaProduto
+        ) && /^https?:\/\//i.test(String(item.imageUrl || ''))
+      ).map((item): CandidataImagem => ({
+        url: String(item.imageUrl || ''),
+        paginaOrigem: String(item.link || item.sourceUrl || ''),
+        largura: Number(item.imageWidth) > 0 ? Number(item.imageWidth) : null,
+        altura: Number(item.imageHeight) > 0 ? Number(item.imageHeight) : null,
+        origem: 'SERPER',
+        metodo: 'SERPER',
+        pontuacao: 55 - (pareceMiniatura(String(item.imageUrl || '')) ? 90 : 0),
+      }));
+      selecao = await selecionarImagens([
+        ...paginasLidas.flatMap(pagina => pagina.imagens),
+        ...paginasWebConfirmadas.flatMap(pagina => pagina.imagens),
+        ...diretas,
+        ...diretasWeb,
+      ]);
+    } catch {
+      // Uma falha no fallback não deve apagar opções válidas da busca de imagens.
+      falhaBuscaWeb = true;
+    }
+  }
+
   return {
     urls: selecao.imagens.map(imagem => imagem.url),
     detalhes: selecao.imagens,
@@ -606,10 +694,13 @@ export async function buscarImagensComGaleria(termo: string, chave: string, refe
       modo: 'COMBINADO',
       paginaGaleria: null,
       paginasDescartadasReferencia: Number(Boolean(primeiraPaginaLida && !primeiraPagina)) +
-        paginasRestantesLidas.filter(item => !item.referenciaConfirmada).length,
+        paginasRestantesLidas.filter(item => !item.referenciaConfirmada).length + paginasWebDescartadas,
+      resultadosWeb,
+      paginasWebAbertas,
+      falhaBuscaWeb,
     },
-    paginas: paginasCandidatas,
-    paginasAbertas: Number(Boolean(primeiraPaginaLida)) + paginasRestantesLidas.length,
-    resultados: itens.length,
+    paginas: [...paginasCandidatas, ...paginasWebDescobertas],
+    paginasAbertas: Number(Boolean(primeiraPaginaLida)) + paginasRestantesLidas.length + paginasWebAbertas,
+    resultados: itens.length + resultadosWeb,
   };
 }
