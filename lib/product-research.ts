@@ -129,7 +129,7 @@ export function referenciasCriticasProduto(termo: string) {
   const semFracoes = termo
     .replace(/\b\d+\s+\d+\s*\/\s*\d+\b/g, ' ')
     .replace(/\b\d+\s*\/\s*\d+\b/g, ' ')
-    .replace(/\b\d+[.,]\d+\b/g, ' ')
+    .replace(/\b\d+[.,]\d+(?=\s|[A-Za-z]|$)/g, ' ')
     .replace(/\b\d+\s*[¼½¾]\b/g, ' ');
   const semMedidas = normalizarReferencia(semFracoes)
     .replace(/\b\d+(?:KHZ|MHZ|GHZ|HZ|MM|CM|KG|MG|ML|V|W)\b/g, ' ')
@@ -207,32 +207,35 @@ const normalizarBuscaImagem = (nome: string) => nome
   .trim();
 
 export const montarTermosImagem = (nome: string, sites: string[], limite: number): string[] => {
-  const busca = normalizarBuscaImagem(nome);
-  const palavras = busca.split(' ').filter(Boolean);
-  const genericas = new Set([
-    'MOUSE', 'SEM', 'FIO', 'COM', 'PARA', 'WIN', 'WINDOWS', 'GHZ', '2.4GHZ',
-    'ALCANCE', 'METROS', 'METRO', 'UN', 'UNIDADE',
-  ]);
-  const referencias = referenciasCriticasProduto(busca);
-  const conjuntoReferencias = new Set(referencias);
-  const distintivas = palavras.filter(palavra =>
-    conjuntoReferencias.has(normalizarReferencia(palavra)) ||
-    (palavra.length > 2 && !genericas.has(palavra.toUpperCase()) && !/^\d+M$/i.test(palavra))
-  );
-  const termoPrincipal = distintivas.length >= 2 ? distintivas.join(' ') : busca;
-  const termoEnxuto = distintivas
-    .filter(palavra =>
-      conjuntoReferencias.has(normalizarReferencia(palavra)) || palavra.length > 2 || /\d/.test(palavra)
-    )
-    .join(' ');
+  const descricaoCompleta = nome.replace(/\s+/g, ' ').trim();
+  const buscaExpandida = normalizarBuscaImagem(descricaoCompleta);
+  const referencias = referenciasCriticasProduto(buscaExpandida);
+  let descricaoSemReferencias = buscaExpandida;
+  for (const referencia of referencias) {
+    const literal = referencia.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    descricaoSemReferencias = descricaoSemReferencias.replace(
+      new RegExp(`(^|[^A-Z0-9])${literal}(?=$|[^A-Z0-9])`, 'i'),
+      '$1 '
+    );
+  }
+  descricaoSemReferencias = descricaoSemReferencias
+    .replace(/(^|\s)[\-_/]+(?=\s|$)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const blocoReferencias = referencias.join(' ');
+  const blocoDescricao = descricaoSemReferencias;
 
-  // A consulta que o operador faria no Google deve ser sempre a primeira.
-  // Aspas em cada pedaço de uma referência composta (ex.: "PT" "467")
-  // reduzem demais o recall e não aceitam naturalmente PT467 / PT-467 / PT 467.
-  // A compatibilidade do modelo é conferida depois, nos resultados e na página.
-  const genericos = [busca, termoEnxuto || termoPrincipal];
-  const consultasDeSites = sites.map(site => `${termoEnxuto || termoPrincipal} site:${site}`);
-  const consultas = [...genericos, ...consultasDeSites];
+  // A primeira consulta é exatamente a descrição informada pelo operador.
+  // As seguintes preservam todas as palavras e apenas movem marca/modelo/código,
+  // porque as lojas publicam a mesma referência em ordens diferentes.
+  const consultasGerais = [
+    descricaoCompleta,
+    blocoReferencias && blocoDescricao ? `${blocoReferencias} ${blocoDescricao}` : '',
+    blocoReferencias && blocoDescricao ? `${blocoDescricao} ${blocoReferencias}` : '',
+    buscaExpandida !== descricaoCompleta ? buscaExpandida : '',
+  ];
+  const consultasDeSites = sites.map(site => `${descricaoCompleta} site:${site}`);
+  const consultas = [...consultasGerais, ...consultasDeSites];
 
   return [...new Set(consultas.map(termo => termo.trim()).filter(Boolean))].slice(0, limite);
 };
