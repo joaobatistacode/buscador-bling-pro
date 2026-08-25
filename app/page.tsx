@@ -108,6 +108,18 @@ const nomeSeguro = (texto: string) =>
   texto.replace(/[\\/:*?"<>|]/g, '-').trim() || 'sem-codigo';
 
 const deuErro = (res: any) => String(res?.curta || '').startsWith('Erro IA:');
+const temFichaCompleta = (produto: ProdutoResultado | undefined) => Boolean(
+  produto && !semInformacao(produto.curta) && temMedidasCompletas(produto)
+);
+
+const erroDeChaveGemini = (dados: unknown) => {
+  const resposta = dados && typeof dados === 'object'
+    ? dados as Record<string, unknown>
+    : {};
+  return /(?:API key not valid|API_KEY_INVALID|invalid API key)/i.test(
+    String(resposta.curta || resposta.error || '')
+  );
+};
 
 // Desenha a imagem já baixada dentro da moldura branca.
 function enquadrar(blobOriginal: Blob): Promise<Blob | null> {
@@ -581,13 +593,21 @@ export default function Home() {
   };
 
   const iniciarProcessamento = async () => {
-    if (!apiKeyGemini) {
-      alert("Insira sua chave do Gemini.");
-      return;
-    }
-
     const linhas = textoColado.trim().split('\n');
     if (linhas.length === 0 || linhas[0] === "") return;
+
+    // Descobre antes de começar se existe alguma ficha que realmente precisa
+    // do Gemini. Lotes que só precisam de imagens podem continuar com o Serper.
+    const porCodigo = new Map<string, ProdutoResultado>(resultados.map(r => [r.codigo, r]));
+    const precisaGemini = linhas.some((linha, indice) => {
+      const partes = linha.split('\t');
+      const codigo = partes.length > 1 ? partes[0] : `TEMP-${indice}`;
+      return !temFichaCompleta(porCodigo.get(codigo));
+    });
+    if (precisaGemini && !apiKeyGemini) {
+      alert("Insira uma chave válida do Gemini para corrigir as fichas incompletas.");
+      return;
+    }
 
     const inicioProcessamento = Date.now();
     setProcessando(true);
@@ -596,9 +616,9 @@ export default function Home() {
     setProgresso({ atual: 0, total: linhas.length });
 
     // Mantém o que já existe e vai atualizando por código.
-    const porCodigo = new Map<string, ProdutoResultado>(resultados.map(r => [r.codigo, r]));
     let pulados = 0;
     let cotaAcabou = false;
+    let chaveGeminiInvalida = false;
 
     for (let i = 0; i < linhas.length; i++) {
       if (pararRef.current) {
@@ -616,11 +636,13 @@ export default function Home() {
       const temImagemAnterior = Boolean(anterior && [
         anterior.img1, anterior.img2, anterior.img3, anterior.img4,
       ].some(Boolean));
-      if (anterior && !deuErro(anterior) && temMedidasCompletas(anterior) && temImagemAnterior) {
+      const fichaAnteriorCompleta = temFichaCompleta(anterior);
+      if (fichaAnteriorCompleta && temImagemAnterior) {
         pulados++;
         setProgresso({ atual: i + 1, total: linhas.length });
         continue;
       }
+      const buscarSomenteImagens = fichaAnteriorCompleta && !temImagemAnterior;
 
       const referencias = selecionarReferencias(nome, codigo, [...porCodigo.values()]);
 
@@ -640,13 +662,16 @@ export default function Home() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               nome,
-              apiKey: apiKeyGemini,
+              apiKey: buscarSomenteImagens ? '' : apiKeyGemini,
               apiKeyImg,
               sitesPreferenciais: sitesImagens
                 .split(/[\n,]+/)
                 .map(site => site.trim())
                 .filter(Boolean),
               limiteConsultasImagens,
+              // Uma ficha já correta nunca volta ao Gemini apenas porque a
+              // imagem está ausente. Assim cada serviço completa só seu campo.
+              somenteImagens: buscarSomenteImagens,
               referencias,
               // Qualquer imagem anterior bloqueia a busca automática e fica preservada.
               preservarImagensExistentes: temImagemAnterior,
@@ -656,6 +681,16 @@ export default function Home() {
           dados = await res.json();
         } catch (e: any) {
           setLog(`Erro de rede em ${nome}: ${e.message}`);
+          break;
+        }
+
+        if (!buscarSomenteImagens && erroDeChaveGemini(dados)) {
+          chaveGeminiInvalida = true;
+          setAviso(
+            'A chave do Gemini foi recusada. Abra Configurações, substitua somente a chave do Gemini, ' +
+            'salve e inicie o mesmo lote novamente. Produtos e imagens já corretos serão preservados.'
+          );
+          setLog(`Processamento interrompido no primeiro erro de credencial (${nome}). Nada pronto foi apagado.`);
           break;
         }
 
@@ -676,6 +711,8 @@ export default function Home() {
           await espera(1000);
         }
       }
+
+      if (chaveGeminiInvalida) break;
 
       if (cotaAcabou) {
         setAviso(
@@ -733,7 +770,7 @@ export default function Home() {
     const comErro = lista.filter(deuErro).length;
     const semImagem = lista.filter(r => !r.img1).length;
 
-    if (!cotaAcabou) {
+    if (!cotaAcabou && !chaveGeminiInvalida) {
       setLog(
         `Lote concluído: ${lista.length} produtos no total` +
         (pulados > 0 ? ` (${pulados} já estavam prontos e foram pulados)` : '') +
@@ -741,7 +778,7 @@ export default function Home() {
       );
     }
 
-    if (!cotaAcabou && !pararRef.current && telegram.configurado) {
+    if (!cotaAcabou && !chaveGeminiInvalida && !pararRef.current && telegram.configurado) {
       try {
         const respostaNotificacao = await fetch('/api/notificacao/telegram', {
           method: 'POST',
