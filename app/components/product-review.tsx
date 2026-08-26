@@ -1,7 +1,13 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { CAMPOS_IMAGEM, type CampoImagem, type ProdutoResultado } from '../produtos';
+import {
+  CAMPOS_IMAGEM,
+  produtoComErro,
+  produtoSemFotos,
+  type CampoImagem,
+  type ProdutoResultado,
+} from '../produtos';
 
 interface ProductReviewProps {
   produtos: ProdutoResultado[];
@@ -12,6 +18,7 @@ interface ProductReviewProps {
   aoBuscarImagens: (indices: number[]) => void;
   aoAplicarSugestoes: (indice: number, urls: string[]) => void;
   aoMarcarRevisado: (indice: number, revisado: boolean) => void;
+  aoRemoverDaRevisao: (indices: number[]) => void;
   buscandoImagens: boolean;
 }
 
@@ -29,6 +36,7 @@ export function ProductReview({
   aoBuscarImagens,
   aoAplicarSugestoes,
   aoMarcarRevisado,
+  aoRemoverDaRevisao,
   buscandoImagens,
 }: ProductReviewProps) {
   const [busca, setBusca] = useState('');
@@ -37,6 +45,7 @@ export function ProductReview({
   const [urlsEmEdicao, setUrlsEmEdicao] = useState<Record<string, string>>({});
   const [erroImagem, setErroImagem] = useState('');
   const [marcados, setMarcados] = useState<number[]>([]);
+  const [confirmandoRemocao, setConfirmandoRemocao] = useState(false);
   const [sugestoesSelecionadas, setSugestoesSelecionadas] = useState<Record<number, string[]>>({});
 
   const filtrados = useMemo(() => {
@@ -58,6 +67,8 @@ export function ProductReview({
 
   const fichaIncompleta = ['peso', 'largura', 'altura', 'profundidade']
     .some(campo => semInformacao(produto[campo as keyof ProdutoResultado]));
+  const produtoTemErro = produtoComErro(produto);
+  const produtoEstaSemFotos = produtoSemFotos(produto);
   const selecionadas = sugestoesSelecionadas[indiceSelecionado] ?? [];
 
   const alternarMarcado = (indice: number) => {
@@ -144,6 +155,38 @@ export function ProductReview({
           >
             {buscandoImagens ? 'Buscando…' : `Buscar novamente (${marcados.length})`}
           </button>
+          <button
+            type="button"
+            onClick={() => setConfirmandoRemocao(true)}
+            disabled={ocupado || marcados.length === 0}
+            className="mt-2 w-full rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-bold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Retirar da revisão ({marcados.length})
+          </button>
+          {confirmandoRemocao && (
+            <div className="mt-3 rounded-lg border border-red-200 bg-white p-3">
+              <p className="text-xs font-bold leading-5 text-red-800">
+                Retirar {marcados.length} produto(s) deste lote? Eles não irão para aprovação nem para o Bling.
+              </p>
+              <div className="mt-3 flex gap-2">
+                <button type="button" onClick={() => setConfirmandoRemocao(false)} className="flex-1 rounded-lg border border-slate-300 px-2 py-2 text-xs font-bold text-slate-600">
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    aoRemoverDaRevisao(marcados);
+                    setMarcados([]);
+                    setConfirmandoRemocao(false);
+                    setSelecionado(0);
+                  }}
+                  className="flex-1 rounded-lg bg-red-600 px-2 py-2 text-xs font-black text-white hover:bg-red-700"
+                >
+                  Confirmar
+                </button>
+              </div>
+            </div>
+          )}
           <p className="mt-2 text-[11px] leading-4 text-slate-500">A busca salva opções para revisar e não troca as fotos sozinha.</p>
         </div>
 
@@ -152,6 +195,8 @@ export function ProductReview({
             const ativo = indice === indiceSelecionado;
             const incompleto = semInformacao(item.peso) || semInformacao(item.largura) ||
               semInformacao(item.altura) || semInformacao(item.profundidade);
+            const temErro = produtoComErro(item);
+            const semFotos = produtoSemFotos(item);
             return (
               <div
                 key={`${item.codigo}-${indice}`}
@@ -166,17 +211,17 @@ export function ProductReview({
                   checked={marcados.includes(indice)}
                   onChange={() => alternarMarcado(indice)}
                   disabled={ocupado}
-                  aria-label={`Marcar ${item.codigo} para nova busca`}
+                  aria-label={`Marcar ${item.codigo} para ações em grupo`}
                   className="h-4 w-4 shrink-0 rounded border-slate-300"
                 />
                 <button type="button" onClick={() => setSelecionado(indice)} className="min-w-0 flex-1 px-1 py-1 text-left">
                   <span className="flex items-center justify-between gap-2">
                     <span className="font-mono text-xs font-bold">{item.codigo}</span>
-                    {incompleto && (
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${ativo ? 'bg-white/20 text-white' : 'bg-amber-100 text-amber-800'}`}>
-                        conferir
-                      </span>
-                    )}
+                    <span className="flex flex-wrap justify-end gap-1">
+                      {temErro && <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${ativo ? 'bg-red-500 text-white' : 'bg-red-100 text-red-800'}`}>erro</span>}
+                      {semFotos && <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${ativo ? 'bg-amber-300 text-amber-950' : 'bg-amber-100 text-amber-800'}`}>sem fotos</span>}
+                      {incompleto && !temErro && <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${ativo ? 'bg-white/20 text-white' : 'bg-amber-100 text-amber-800'}`}>conferir</span>}
+                    </span>
                   </span>
                   <span className={`mt-1 block truncate text-sm ${ativo ? 'text-blue-50' : 'text-slate-600'}`}>
                     {item.nome}
@@ -209,6 +254,8 @@ export function ProductReview({
             >
               {buscandoImagens ? 'Buscando…' : 'Buscar novas imagens'}
             </button>
+            {produtoTemErro && <span role="alert" className="rounded-full bg-red-100 px-3 py-1 text-xs font-black text-red-800 ring-1 ring-red-200">Com erro</span>}
+            {produtoEstaSemFotos && <span role="alert" className="rounded-full bg-amber-100 px-3 py-1 text-xs font-black text-amber-900 ring-1 ring-amber-200">Sem fotos</span>}
             <span className={`rounded-full px-3 py-1 text-xs font-bold ${
               fichaIncompleta ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'
             }`}>

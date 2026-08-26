@@ -36,3 +36,20 @@ export interface ProdutoResultado {
   imagensSugeridasDetalhes?: ImagemSugerida[];
   imagensExcluidas?: Partial<Record<CampoImagem, string>>;
 }
+
+const CAMPOS_COM_DIAGNOSTICO: (keyof ProdutoResultado)[] = [
+  'curta', 'marca', 'peso', 'largura', 'altura', 'profundidade',
+  'justificativaMedidas', 'fonteMedidas',
+];
+
+export const produtoSemFotos = (produto: ProdutoResultado) =>
+  CAMPOS_IMAGEM.every(campo => !String(produto[campo] || '').trim());
+
+export const produtoComErro = (produto: ProdutoResultado) =>
+  CAMPOS_COM_DIAGNOSTICO.some(campo => {
+    const valor = String(produto[campo] || '').trim().toUpperCase();
+    return /^(ERRO|FALHA)\b/.test(valor) ||
+      valor.includes('ERRO IA:') ||
+      valor.includes('API KEY NOT VALID') ||
+      valor.includes('API_KEY_INVALID');
+  });

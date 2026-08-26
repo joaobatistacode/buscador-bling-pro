@@ -5,8 +5,9 @@ import { montarZip, type ArquivoZip } from './zip';
 import { enviarProduto, type ResultadoEnvio } from './enviar-bling';
 import { ProductReview } from './components/product-review';
 import { WorkflowStepper, type EtapaFluxo } from './components/workflow-stepper';
-import { type CampoImagem, type ProdutoResultado } from './produtos';
+import { produtoComErro, produtoSemFotos, type CampoImagem, type ProdutoResultado } from './produtos';
 import { DashboardView, HistoryView, TasksView } from './components/operations-hub';
+import { CategoryAdminView } from './components/category-admin';
 
 const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -107,7 +108,7 @@ const selecionarReferencias = (nome: string, codigo: string, produtos: ProdutoCo
 const nomeSeguro = (texto: string) =>
   texto.replace(/[\\/:*?"<>|]/g, '-').trim() || 'sem-codigo';
 
-const deuErro = (res: any) => String(res?.curta || '').startsWith('Erro IA:');
+const deuErro = (produto: ProdutoResultado) => produtoComErro(produto);
 const temFichaCompleta = (produto: ProdutoResultado | undefined) => Boolean(
   produto && !semInformacao(produto.curta) && temMedidasCompletas(produto)
 );
@@ -197,7 +198,7 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 
 export default function Home() {
   const router = useRouter();
-  const [visaoAtual, setVisaoAtual] = useState<'dashboard' | 'fluxo' | 'historico' | 'tarefas' | 'configuracoes'>('fluxo');
+  const [visaoAtual, setVisaoAtual] = useState<'dashboard' | 'fluxo' | 'categorias' | 'historico' | 'tarefas' | 'configuracoes'>('fluxo');
   const [etapaAtual, setEtapaAtual] = useState(1);
   const [loteAprovado, setLoteAprovado] = useState(false);
   const [textoColado, setTextoColado] = useState('');
@@ -488,6 +489,28 @@ export default function Home() {
     salvarHistorico(proximos);
     setEnvios([]);
     setLoteAprovado(false);
+  };
+
+  const removerDaRevisao = (indices: number[]) => {
+    const selecionados = new Set(indices);
+    const removidos = resultados.filter((_, indice) => selecionados.has(indice));
+    if (removidos.length === 0) return;
+
+    const proximos = resultados.filter((_, indice) => !selecionados.has(indice));
+    if (proximos.length > 0) {
+      setResultados(proximos);
+      salvarHistorico(proximos);
+    } else {
+      localStorage.removeItem(CHAVE_HISTORICO);
+      setResultados([]);
+      setEtapaAtual(1);
+    }
+    setEnvios([]);
+    setLoteAprovado(false);
+    setAviso(
+      `${removidos.length} produto(s) retirado(s) da revisão e do lote de envio. ` +
+      `Nenhum cadastro foi excluído ou alterado no Bling; eles continuam disponíveis no Histórico.`
+    );
   };
 
   const definirImagemManual = (
@@ -954,7 +977,7 @@ export default function Home() {
     ? textoColado.trim().split('\n').filter(linha => linha.trim()).length
     : 0;
   const comErro = resultados.filter(deuErro).length;
-  const semImagem = resultados.filter(produto => !produto.img1).length;
+  const semImagem = resultados.filter(produtoSemFotos).length;
   const medidasParaConferir = resultados.filter(produto =>
     !['REAL', 'REAPROVEITADO'].includes(String(produto.origemMedidas))
   ).length;
@@ -988,7 +1011,7 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {([['dashboard','Dashboard'],['fluxo','Produtos'],['historico','Histórico'],['tarefas','Tarefas'],['configuracoes','Config.']] as const).map(([visao, rotulo]) => (
+            {([['dashboard','Dashboard'],['fluxo','Produtos'],['categorias','Categorias'],['historico','Histórico'],['tarefas','Tarefas'],['configuracoes','Config.']] as const).map(([visao, rotulo]) => (
               <button key={visao} type="button" onClick={() => setVisaoAtual(visao)} disabled={ocupado} aria-current={visaoAtual === visao ? 'page' : undefined} className={`hidden rounded-lg px-3 py-2 text-sm font-bold transition md:block ${visaoAtual === visao ? 'bg-cyan-400 text-[#071a24]' : 'text-slate-300 hover:bg-white/10 hover:text-white'} disabled:opacity-40`}>
                 {rotulo}
               </button>
@@ -1007,7 +1030,7 @@ export default function Home() {
 
       <div className="mx-auto max-w-7xl px-5 py-6 md:px-8 md:py-8">
         <div className="mb-5 flex gap-2 overflow-x-auto md:hidden">
-          {([['dashboard','Dashboard'],['fluxo','Produtos'],['historico','Histórico'],['tarefas','Tarefas'],['configuracoes','Config.']] as const).map(([visao, rotulo]) => <button key={visao} onClick={() => setVisaoAtual(visao)} className={`shrink-0 rounded-lg px-3 py-2 text-sm font-bold ${visaoAtual === visao ? 'bg-slate-950 text-white' : 'bg-white text-slate-600'}`}>{rotulo}</button>)}
+          {([['dashboard','Dashboard'],['fluxo','Produtos'],['categorias','Categorias'],['historico','Histórico'],['tarefas','Tarefas'],['configuracoes','Config.']] as const).map(([visao, rotulo]) => <button key={visao} onClick={() => setVisaoAtual(visao)} className={`shrink-0 rounded-lg px-3 py-2 text-sm font-bold ${visaoAtual === visao ? 'bg-slate-950 text-white' : 'bg-white text-slate-600'}`}>{rotulo}</button>)}
         </div>
         {visaoAtual === 'dashboard' && (
           <DashboardView
@@ -1021,6 +1044,7 @@ export default function Home() {
           setResultados(proximos); salvarHistorico(proximos); setLoteAprovado(false); setEtapaAtual(3); setVisaoAtual('fluxo');
         }} />}
         {visaoAtual === 'tarefas' && <TasksView />}
+        {visaoAtual === 'categorias' && <CategoryAdminView />}
         {visaoAtual === 'fluxo' && (
           <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:p-5">
             <WorkflowStepper
@@ -1415,6 +1439,7 @@ export default function Home() {
               aoBuscarImagens={buscarImagensNovamente}
               aoAplicarSugestoes={aplicarImagensSugeridas}
               aoMarcarRevisado={marcarRevisado}
+              aoRemoverDaRevisao={removerDaRevisao}
             />
 
             <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
