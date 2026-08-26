@@ -114,6 +114,14 @@ const ESQUEMA = {
   ],
 };
 
+const ESQUEMA_DESCRICAO = {
+  type: "OBJECT",
+  properties: {
+    curta: { type: "STRING" },
+  },
+  required: ["curta"],
+};
+
 // Quando estoura a cota, o Google informa quantos segundos esperar.
 function segundosParaTentarDeNovo(erro: any): number | null {
   const detalhes = erro?.details;
@@ -137,6 +145,55 @@ class ErroDeCota extends Error {
     super(mensagem);
     this.esperar = esperar;
   }
+}
+
+async function gerarDescricaoCurta(nome: string, chave: string): Promise<string> {
+  const prompt = `Atue como um especialista em e-commerce brasileiro.
+Produto: '${nome}'
+
+Escreva somente a descrição curta deste produto em uma única frase comercial,
+natural e convincente, preferencialmente entre 120 e 136 caracteres e nunca
+acima de 136. Preserve marca, modelo, referência, medida, cor, quantidade e
+demais identificadores presentes no nome, mesmo quando estiverem em outra ordem.
+Inclua até dois benefícios reais que possam ser concluídos com segurança pelo
+tipo do produto. Não use HTML, quebra de linha, lista, slogan genérico nem
+invente especificações.`;
+
+  const urlGemini = `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${chave}`;
+  let ultimoErro = '';
+
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+    const res = await fetch(urlGemini, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: ESQUEMA_DESCRICAO,
+        },
+      }),
+    });
+    const dados = await res.json();
+
+    if (!dados.error) {
+      const resposta = dados.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!resposta) throw new Error('A IA respondeu vazio.');
+      const bruto = JSON.parse(resposta) as { curta?: unknown };
+      const curta = limparHtml(String(bruto.curta ?? '')).slice(0, 136).trim();
+      if (!curta) throw new Error('A IA não devolveu uma descrição curta.');
+      return curta;
+    }
+
+    ultimoErro = String(dados.error.message || 'Falha desconhecida na IA.');
+    if (res.status === 429) {
+      throw new ErroDeCota(ultimoErro, segundosParaTentarDeNovo(dados.error) ?? 60);
+    }
+    if (res.status !== 503 || tentativa === 3) break;
+    await espera(tentativa * 1500);
+  }
+
+  throw new Error(ultimoErro || 'Falha desconhecida na IA.');
 }
 
 // Sobrecarga (503) é passageira e some em segundos, então essa dá para
@@ -295,6 +352,7 @@ export async function POST(request: Request) {
     const body = JSON.parse(new TextDecoder().decode(corpo));
     const { nome, apiKey, apiKeyImg } = body;
     const somenteImagens = body.somenteImagens === true;
+    const somenteDescricao = body.somenteDescricao === true;
     const preservarImagensExistentes = body.preservarImagensExistentes === true;
     // Busca automática exige autorização explícita. A busca manual usa
     // `somenteImagens` e continua disponível para uma decisão consciente.
@@ -322,6 +380,21 @@ export async function POST(request: Request) {
           };
         })
       : [];
+
+    if (somenteDescricao) {
+      try {
+        const curta = await gerarDescricaoCurta(String(nome || ''), String(apiKey || '').trim());
+        return NextResponse.json({ curta });
+      } catch (e: unknown) {
+        const mensagem = e instanceof Error ? e.message : 'Falha desconhecida na IA.';
+        return NextResponse.json({
+          curta: `Erro IA: ${mensagem}`,
+          cotaExcedida: e instanceof ErroDeCota,
+          esperarSegundos: e instanceof ErroDeCota ? e.esperar : 0,
+        });
+      }
+    }
+
     // A pesquisa técnica roda em paralelo à busca de imagens, reduzindo o
     // tempo por produto sem aumentar o número de consultas.
     const fontesPromise: Promise<FonteProduto[]> = somenteImagens

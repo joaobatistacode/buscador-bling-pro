@@ -209,6 +209,7 @@ export default function Home() {
   const [resultados, setResultados] = useState<ProdutoResultado[]>([]);
   const [processando, setProcessando] = useState(false);
   const [buscandoImagens, setBuscandoImagens] = useState(false);
+  const [buscandoDescricoes, setBuscandoDescricoes] = useState(false);
   const [baixando, setBaixando] = useState(false);
   const [log, setLog] = useState('');
   const [aviso, setAviso] = useState('');
@@ -594,6 +595,90 @@ export default function Home() {
       : `Nova busca concluída para ${concluidos} produto(s). Abra cada produto e escolha até 4 imagens.`);
   };
 
+  const buscarDescricoesNovamente = async (indices: number[]) => {
+    const unicos = [...new Set(indices)].filter(indice => resultados[indice]);
+    if (unicos.length === 0) return;
+    if (!apiKeyGemini) {
+      setAviso('Configure uma chave válida do Gemini antes de buscar as descrições.');
+      setVisaoAtual('configuracoes');
+      return;
+    }
+
+    setBuscandoDescricoes(true);
+    setAviso('');
+    pararRef.current = false;
+    let proximos = resultados;
+    let concluidos = 0;
+    let falhas = 0;
+
+    for (let posicao = 0; posicao < unicos.length; posicao++) {
+      if (pararRef.current) break;
+      const indice = unicos[posicao];
+      const produto = proximos[indice];
+      setLog(`[${posicao + 1}/${unicos.length}] Buscando descrição: ${produto.nome}`);
+
+      let dados: Record<string, unknown> | null = null;
+      for (let tentativa = 1; tentativa <= 3; tentativa++) {
+        if (pararRef.current) break;
+        try {
+          const resposta = await fetch('/api/processar', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              nome: produto.nome,
+              apiKey: apiKeyGemini,
+              somenteDescricao: true,
+            }),
+          });
+          dados = await resposta.json();
+          if (!resposta.ok) throw new Error(String(dados?.error || 'Falha ao consultar o Gemini.'));
+        } catch (erro: unknown) {
+          dados = { error: erro instanceof Error ? erro.message : 'Erro de rede.' };
+        }
+
+        if (erroDeChaveGemini(dados)) {
+          setAviso('A chave do Gemini foi recusada. Corrija a chave em Configurações e tente novamente; nenhuma descrição existente foi apagada.');
+          pararRef.current = true;
+          break;
+        }
+        if (dados?.cotaExcedida !== true) break;
+        if (tentativa === 3) {
+          setAviso('A cota do Gemini continua indisponível. As descrições já concluídas foram salvas e as demais ficaram intactas.');
+          pararRef.current = true;
+          break;
+        }
+
+        const segundos = Math.max(5, Number(dados.esperarSegundos) || 60);
+        for (let resta = segundos; resta > 0; resta--) {
+          if (pararRef.current) break;
+          setLog(`Cota da IA atingida. Aguardando ${resta}s para tentar novamente (${produto.nome}).`);
+          await espera(1000);
+        }
+      }
+
+      const curta = String(dados?.curta || '').trim();
+      if (!pararRef.current && curta && !curta.toUpperCase().startsWith('ERRO IA:')) {
+        proximos = proximos.map((item, itemIndice) => itemIndice === indice
+          ? { ...item, curta, revisado: false }
+          : item);
+        setResultados(proximos);
+        salvarHistorico(proximos);
+        concluidos++;
+      } else if (!pararRef.current) {
+        falhas++;
+      }
+
+      if (!pararRef.current && posicao < unicos.length - 1) await espera(1500);
+    }
+
+    setBuscandoDescricoes(false);
+    setLoteAprovado(false);
+    setEnvios([]);
+    setLog(pararRef.current
+      ? `Busca de descrições interrompida com segurança: ${concluidos} de ${unicos.length} concluída(s).`
+      : `Descrições concluídas: ${concluidos} atualizada(s)${falhas ? ` e ${falhas} com falha` : ''}. Revise os textos antes de aprovar.`);
+  };
+
   const aplicarImagensSugeridas = (indiceProduto: number, urls: string[]) => {
     if (urls.length === 0) return;
     const proximos = resultados.map((produto, indice) => indice === indiceProduto
@@ -965,7 +1050,7 @@ export default function Home() {
     );
   };
 
-  const ocupado = processando || buscandoImagens || baixando || enviandoBling;
+  const ocupado = processando || buscandoImagens || buscandoDescricoes || baixando || enviandoBling;
 
   const sairAplicacao = async () => {
     await fetch('/api/acesso/sair', { method: 'POST' }).catch(() => null);
@@ -1416,9 +1501,9 @@ export default function Home() {
               </div>
             </div>
 
-            {buscandoImagens && (
+            {(buscandoImagens || buscandoDescricoes) && (
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
-                <p className="text-sm font-semibold text-blue-900">{log || 'Buscando novas opções de imagens…'}</p>
+                <p className="text-sm font-semibold text-blue-900">{log || (buscandoDescricoes ? 'Buscando novas descrições…' : 'Buscando novas opções de imagens…')}</p>
                 <button
                   type="button"
                   onClick={() => { pararRef.current = true; }}
@@ -1433,10 +1518,12 @@ export default function Home() {
               produtos={resultados}
               ocupado={ocupado}
               buscandoImagens={buscandoImagens}
+              buscandoDescricoes={buscandoDescricoes}
               aoAlterar={atualizarResultado}
               aoAlterarImagem={alterarSelecaoImagem}
               aoDefinirImagem={definirImagemManual}
               aoBuscarImagens={buscarImagensNovamente}
+              aoBuscarDescricoes={buscarDescricoesNovamente}
               aoAplicarSugestoes={aplicarImagensSugeridas}
               aoMarcarRevisado={marcarRevisado}
               aoRemoverDaRevisao={removerDaRevisao}

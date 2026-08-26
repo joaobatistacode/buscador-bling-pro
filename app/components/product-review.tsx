@@ -16,10 +16,12 @@ interface ProductReviewProps {
   aoAlterarImagem: (indice: number, campo: CampoImagem, selecionar: boolean) => void;
   aoDefinirImagem: (indice: number, campo: CampoImagem, url: string) => void;
   aoBuscarImagens: (indices: number[]) => void;
+  aoBuscarDescricoes: (indices: number[]) => void;
   aoAplicarSugestoes: (indice: number, urls: string[]) => void;
   aoMarcarRevisado: (indice: number, revisado: boolean) => void;
   aoRemoverDaRevisao: (indices: number[]) => void;
   buscandoImagens: boolean;
+  buscandoDescricoes: boolean;
 }
 
 const semInformacao = (valor: unknown) => {
@@ -34,10 +36,12 @@ export function ProductReview({
   aoAlterarImagem,
   aoDefinirImagem,
   aoBuscarImagens,
+  aoBuscarDescricoes,
   aoAplicarSugestoes,
   aoMarcarRevisado,
   aoRemoverDaRevisao,
   buscandoImagens,
+  buscandoDescricoes,
 }: ProductReviewProps) {
   const [busca, setBusca] = useState('');
   const [somentePendentes, setSomentePendentes] = useState(false);
@@ -157,6 +161,14 @@ export function ProductReview({
           </button>
           <button
             type="button"
+            onClick={() => aoBuscarDescricoes(marcados)}
+            disabled={ocupado || marcados.length === 0}
+            className="mt-2 w-full rounded-lg border border-violet-200 bg-violet-50 px-3 py-2.5 text-sm font-bold text-violet-800 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {buscandoDescricoes ? 'Buscando descrições…' : `Buscar descrições novamente (${marcados.length})`}
+          </button>
+          <button
+            type="button"
             onClick={() => setConfirmandoRemocao(true)}
             disabled={ocupado || marcados.length === 0}
             className="mt-2 w-full rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-bold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40"
@@ -187,7 +199,7 @@ export function ProductReview({
               </div>
             </div>
           )}
-          <p className="mt-2 text-[11px] leading-4 text-slate-500">A busca salva opções para revisar e não troca as fotos sozinha.</p>
+          <p className="mt-2 text-[11px] leading-4 text-slate-500">Imagens ficam como opções. A busca de descrições substitui somente o texto curto dos produtos marcados.</p>
         </div>
 
         <div className="max-h-72 overflow-y-auto p-2 lg:max-h-[550px]">
