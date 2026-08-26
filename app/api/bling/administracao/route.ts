@@ -106,6 +106,53 @@ async function tokenDaSessao() {
   return token;
 }
 
+async function consultaOpcional<T>(nome: string, consulta: () => Promise<T>) {
+  try {
+    return { dados: await consulta(), aviso: '' };
+  } catch (erro) {
+    return {
+      dados: [] as T,
+      aviso: `${nome}: ${erro instanceof Error ? erro.message : 'consulta indisponível'}`,
+    };
+  }
+}
+
+function idsPositivos(valor: string | null, limite = 200) {
+  const ids = [...new Set(String(valor || '').split(',').map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
+  if (ids.length > limite) throw new Error(`Selecione no máximo ${limite} categorias por consulta.`);
+  return ids;
+}
+
+async function listarProdutosDasCategorias(ids: number[], token: string, busca: string) {
+  const mapa = new Map<number, unknown>();
+  let truncado = false;
+  for (const idCategoria of ids) {
+    for (let pagina = 1; pagina <= 5; pagina++) {
+      if (mapa.size >= 2_000) { truncado = true; break; }
+      if (mapa.size || pagina > 1) await pausa(360);
+      const parametros = new URLSearchParams({
+        pagina: String(pagina), limite: '100', criterio: '5', tipo: 'T', idCategoria: String(idCategoria),
+      });
+      if (busca) parametros.set('nome', busca);
+      const retorno = await chamarBling(`/produtos?${parametros}`, token);
+      const lote = Array.isArray(retorno?.data) ? retorno.data : [];
+      for (const produto of lote) mapa.set(Number(produto.id), produto);
+      if (lote.length < 100) break;
+      if (pagina === 5) truncado = true;
+    }
+    if (mapa.size >= 2_000) break;
+  }
+  if (busca) {
+    await pausa(360);
+    const porCodigo = await chamarBling(`/produtos?pagina=1&limite=5&criterio=5&codigos[]=${encodeURIComponent(busca)}`, token);
+    const permitidas = new Set(ids);
+    for (const produto of Array.isArray(porCodigo?.data) ? porCodigo.data : []) {
+      if (permitidas.has(Number(produto?.categoria?.id || 0))) mapa.set(Number(produto.id), produto);
+    }
+  }
+  return { produtos: [...mapa.values()], truncado };
+}
+
 function camposDoProduto(produto: Objeto) {
   return Array.isArray(produto.camposCustomizados) ? produto.camposCustomizados : [];
 }
@@ -193,17 +240,28 @@ export async function GET(request: Request) {
     if (recurso === 'resumo') {
       const categorias = await listarTudo('/categorias/produtos', token);
       await pausa(360);
-      const canais = await listarTudo('/canais-venda?situacao=1', token, 20);
+      const canaisResultado = await consultaOpcional('Canais de venda', () => listarTudo('/canais-venda?situacao=1', token, 20));
       await pausa(360);
-      const modulos = (await chamarBling('/campos-customizados/modulos', token))?.data || [];
+      const modulosResultado = await consultaOpcional('Módulos de campos', async () => (await chamarBling('/campos-customizados/modulos', token))?.data || []);
       await pausa(360);
-      const tipos = (await chamarBling('/campos-customizados/tipos', token))?.data || [];
-      return Response.json({ categorias, canais, modulos, tipos });
+      const tiposResultado = await consultaOpcional('Tipos de campos', async () => (await chamarBling('/campos-customizados/tipos', token))?.data || []);
+      return Response.json({
+        categorias,
+        canais: canaisResultado.dados,
+        modulos: modulosResultado.dados,
+        tipos: tiposResultado.dados,
+        avisos: [canaisResultado.aviso, modulosResultado.aviso, tiposResultado.aviso].filter(Boolean),
+      });
     }
 
     if (recurso === 'produtos') {
       const categoria = url.searchParams.get('categoria');
+      const categorias = idsPositivos(url.searchParams.get('categorias'));
       const busca = String(url.searchParams.get('q') || '').trim().slice(0, 120);
+      if (categorias.length) {
+        const retorno = await listarProdutosDasCategorias(categorias, token, busca);
+        return Response.json(retorno);
+      }
       const parametros = new URLSearchParams({ pagina: '1', limite: '50', criterio: '5', tipo: 'T' });
       if (categoria) parametros.set('idCategoria', String(inteiro(categoria, 'Categoria')));
       if (busca) parametros.set('nome', busca);
@@ -217,6 +275,51 @@ export async function GET(request: Request) {
         produtos = [...mapa.values()];
       }
       return Response.json({ produtos });
+    }
+
+    if (recurso === 'diagnostico') {
+      const ids = idsPositivos(url.searchParams.get('ids'), 50);
+      if (!ids.length) throw new Error('Selecione ao menos um produto para o diagnóstico.');
+
+      const parametrosLote = new URLSearchParams({ pagina: '1', limite: '100', criterio: '5', tipo: 'T' });
+      ids.forEach(id => parametrosLote.append('idsProdutos[]', String(id)));
+      const produtosRetorno = await chamarBling(`/produtos?${parametrosLote}`, token);
+      const produtos = new Map<number, Objeto>((Array.isArray(produtosRetorno?.data) ? produtosRetorno.data : []).map((item: Objeto) => [Number(item.id), item]));
+      await pausa(360);
+      const parametrosSaldo = new URLSearchParams();
+      ids.forEach(id => parametrosSaldo.append('idsProdutos[]', String(id)));
+      const saldosRetorno = await chamarBling(`/estoques/saldos?${parametrosSaldo}`, token);
+      const saldos = new Map<number, Objeto>((Array.isArray(saldosRetorno?.data) ? saldosRetorno.data : []).map((item: Objeto) => [Number((item.produto as Objeto | undefined)?.id), item]));
+      const diagnosticos: Objeto[] = [];
+
+      for (const id of ids) {
+        await pausa(360);
+        const produto = produtos.get(id) || {};
+        let vinculos: unknown[] = [];
+        let canalConferido = true;
+        try {
+          vinculos = await listarTudo(`/produtos/lojas?idProduto=${id}`, token, 5);
+        } catch {
+          canalConferido = false;
+        }
+        const saldo = saldos.get(id);
+        const saldoFisico = Number(saldo?.saldoFisicoTotal || 0);
+        const saldoVirtual = Number(saldo?.saldoVirtualTotal || 0);
+        const quantidadeImagens = String(produto.imagemURL || '').trim() ? 1 : 0;
+        const semImagem = quantidadeImagens === 0;
+        const semCanal = vinculos.length === 0;
+        diagnosticos.push({
+          id,
+          saldoFisico,
+          saldoVirtual,
+          quantidadeImagens,
+          quantidadeCanais: vinculos.length,
+          canalConferido,
+          canais: vinculos.map(item => Number(((item as Objeto).loja as Objeto | undefined)?.id || 0)).filter(Boolean),
+          alerta: saldoFisico > 0 && semImagem && semCanal && canalConferido,
+        });
+      }
+      return Response.json({ diagnosticos });
     }
 
     if (recurso === 'produto') {

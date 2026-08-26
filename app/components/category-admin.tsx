@@ -1,13 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { CategoryBrowser, type CategoriaCatalogo, type ProdutoCatalogo } from './category-browser';
 
-type Categoria = { id: number; descricao: string; categoriaPai?: { id?: number } };
+type Categoria = CategoriaCatalogo;
 type Canal = { id: number; descricao: string; tipo: string; situacao: number };
 type Modulo = { id: number; nome: string; modulo: string };
 type TipoCampo = { id: number; nome: string; mascara?: string };
 type Campo = { id: number; nome: string; situacao?: number };
-type ProdutoLista = { id: number; codigo: string; nome: string; imagemURL?: string; situacao?: string };
+type ProdutoLista = ProdutoCatalogo;
 type ValorCampo = { idCampoCustomizado: number; idVinculo?: number; valor?: string; item?: string };
 type Produto = ProdutoLista & { categoria?: { id?: number }; camposCustomizados?: ValorCampo[] };
 type CategoriaCanal = { id: string | number; nome: string };
@@ -41,6 +42,19 @@ function nomeCategoria(id: number | undefined, categorias: Categoria[]) {
   return categorias.find(categoria => categoria.id === id)?.descricao || (id ? `Categoria ${id}` : 'Sem categoria');
 }
 
+function caminhoCategoria(id: number, categorias: Categoria[]) {
+  const porId = new Map(categorias.map(item => [item.id, item]));
+  const partes: string[] = [];
+  const visitados = new Set<number>();
+  let atual = porId.get(id);
+  while (atual && !visitados.has(atual.id)) {
+    visitados.add(atual.id);
+    partes.unshift(atual.descricao);
+    atual = porId.get(Number(atual.categoriaPai?.id || 0));
+  }
+  return partes.join(' › ');
+}
+
 export function CategoryAdminView() {
   const [secao, setSecao] = useState<'editor' | 'campos' | 'canais'>('editor');
   const [categorias, setCategorias] = useState<Categoria[]>([]);
@@ -52,10 +66,6 @@ export function CategoryAdminView() {
   const [mensagem, setMensagem] = useState('');
   const [erro, setErro] = useState('');
 
-  const [filtroCategoria, setFiltroCategoria] = useState('');
-  const [buscaProduto, setBuscaProduto] = useState('');
-  const [produtos, setProdutos] = useState<ProdutoLista[]>([]);
-  const [buscandoProdutos, setBuscandoProdutos] = useState(false);
   const [produto, setProduto] = useState<Produto | null>(null);
   const [categoriaNova, setCategoriaNova] = useState('');
   const [valoresCampos, setValoresCampos] = useState<Record<number, string>>({});
@@ -85,7 +95,8 @@ export function CategoryAdminView() {
       setCanais(dados.canais || []);
       setModulos(dados.modulos || []);
       setTipos(dados.tipos || []);
-      setMensagem(`${(dados.categorias || []).length} categorias importadas do Bling. Nenhuma informação foi alterada.`);
+      const aviso = Array.isArray(dados.avisos) && dados.avisos.length ? ` Avisos de permissão: ${dados.avisos.join(' | ')}` : '';
+      setMensagem(`${(dados.categorias || []).length} categorias importadas do Bling. Nenhuma informação foi alterada.${aviso}`);
     } catch (e) { setErro(e instanceof Error ? e.message : 'Não foi possível consultar o Bling.'); }
     finally { setCarregando(false); }
   }, []);
@@ -101,20 +112,6 @@ export function CategoryAdminView() {
       .then(jsonDaResposta).then(dados => setCampos(dados.campos || []))
       .catch(e => setErro(e instanceof Error ? e.message : 'Não foi possível carregar os campos.'));
   }, [moduloProdutos]);
-
-  const pesquisarProdutos = async () => {
-    if (!filtroCategoria && !buscaProduto.trim()) { setErro('Escolha uma categoria ou informe um SKU/nome.'); return; }
-    setBuscandoProdutos(true); setErro(''); setProduto(null); setSimulacaoProduto(null);
-    try {
-      const parametros = new URLSearchParams({ recurso: 'produtos' });
-      if (filtroCategoria) parametros.set('categoria', filtroCategoria);
-      if (buscaProduto.trim()) parametros.set('q', buscaProduto.trim());
-      const dados = await jsonDaResposta(await fetch(`/api/bling/administracao?${parametros}`));
-      setProdutos(dados.produtos || []);
-      if (!(dados.produtos || []).length) setMensagem('Nenhum produto encontrado com esses filtros.');
-    } catch (e) { setErro(e instanceof Error ? e.message : 'Falha ao pesquisar produtos.'); }
-    finally { setBuscandoProdutos(false); }
-  };
 
   const abrirProduto = async (item: ProdutoLista) => {
     setErro(''); setMensagem(''); setSimulacaoProduto(null); setConfirmacaoProduto('');
@@ -236,19 +233,16 @@ export function CategoryAdminView() {
         {([['editor','Editor de produtos'],['campos','Campos customizados'],['canais','Mercado Livre, Shopee e Amazon']] as const).map(([id, rotulo]) => <button key={id} type="button" onClick={() => setSecao(id)} className={`shrink-0 rounded-xl px-4 py-2.5 text-sm font-black ${secao === id ? 'bg-[#071a24] text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{rotulo}</button>)}
       </div>
 
-      {secao === 'editor' && <div className="grid gap-5 xl:grid-cols-[360px_1fr]">
-        <aside className={`${cartao} p-5`}>
-          <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-black uppercase tracking-wider text-cyan-700">Catálogo atual</p><h3 className="mt-1 text-xl font-black">Localizar produto</h3></div><button type="button" onClick={() => baixarCategorias(categorias)} className="text-xs font-black text-blue-700">Exportar CSV</button></div>
-          <label className="mt-5 block text-xs font-black uppercase tracking-wide text-slate-500">Categoria<select value={filtroCategoria} onChange={e => setFiltroCategoria(e.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm font-semibold normal-case"><option value="">Todas</option>{categoriasOrdenadas.map(c => <option key={c.id} value={c.id}>{c.descricao}</option>)}</select></label>
-          <label className="mt-4 block text-xs font-black uppercase tracking-wide text-slate-500">SKU ou nome<input value={buscaProduto} onChange={e => setBuscaProduto(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') pesquisarProdutos(); }} className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-3 text-sm font-normal normal-case" placeholder="Ex.: 5440 ou controle Intelbras" /></label>
-          <button type="button" onClick={pesquisarProdutos} disabled={buscandoProdutos} className="mt-4 w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{buscandoProdutos ? 'Consultando…' : 'Buscar no Bling'}</button>
-          <div className="mt-4 max-h-[520px] space-y-1 overflow-auto">{produtos.map(item => <button key={item.id} type="button" onClick={() => abrirProduto(item)} className={`w-full rounded-xl px-3 py-3 text-left ${produto?.id === item.id ? 'bg-[#071a24] text-white' : 'hover:bg-slate-50'}`}><span className="block font-mono text-xs font-black text-cyan-600">{item.codigo}</span><span className="mt-1 block text-sm font-semibold">{item.nome}</span></button>)}</div>
-        </aside>
-
+      {secao === 'editor' && <div className="space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><p className="text-xs font-black uppercase tracking-wider text-cyan-700">Mapa do catálogo</p><h3 className="mt-1 text-2xl font-black">Segmento, categoria e subcategoria</h3></div>
+          <button type="button" onClick={() => baixarCategorias(categorias)} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-black text-blue-700">Exportar árvore CSV</button>
+        </div>
+        <CategoryBrowser categorias={categorias} produtoAberto={produto?.id} aoAbrir={abrirProduto} aoErro={setErro} />
         <div className={`${cartao} p-5 md:p-7`}>
           {!produto ? <div className="grid min-h-96 place-items-center text-center text-sm text-slate-500"><div><p className="text-lg font-black text-slate-800">Selecione um produto</p><p className="mt-2">A categoria atual e os campos serão lidos diretamente do Bling.</p></div></div> : <>
             <div className="border-b border-slate-200 pb-5"><p className="font-mono text-xs font-black text-cyan-700">{produto.codigo}</p><h3 className="mt-1 text-2xl font-black">{produto.nome}</h3><p className="mt-2 text-sm text-slate-500">Atual: {nomeCategoria(produto.categoria?.id, categorias)}</p></div>
-            <label className="mt-6 block text-sm font-black">Mover para categoria/subcategoria<select value={categoriaNova} onChange={e => { setCategoriaNova(e.target.value); setSimulacaoProduto(null); }} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm"><option value="">Selecione</option>{categoriasOrdenadas.map(c => <option key={c.id} value={c.id}>{c.descricao}{c.categoriaPai?.id ? ` · filha de ${nomeCategoria(c.categoriaPai.id, categorias)}` : ''}</option>)}</select></label>
+            <label className="mt-6 block text-sm font-black">Mover para segmento/categoria/subcategoria<select value={categoriaNova} onChange={e => { setCategoriaNova(e.target.value); setSimulacaoProduto(null); }} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm"><option value="">Selecione</option>{categoriasOrdenadas.map(c => <option key={c.id} value={c.id}>{caminhoCategoria(c.id, categorias)}</option>)}</select></label>
             <div className="mt-7"><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-black uppercase tracking-wider text-blue-700">Produto</p><h4 className="mt-1 text-lg font-black">Campos customizados</h4></div><span className="text-xs text-slate-500">{campos.length} cadastrados</span></div><div className="mt-4 grid gap-4 md:grid-cols-2">{campos.filter(c => c.situacao !== 0).map(campo => <label key={campo.id} className="text-xs font-black uppercase tracking-wide text-slate-500">{campo.nome}<input value={valoresCampos[campo.id] || ''} onChange={e => { setValoresCampos(v => ({ ...v, [campo.id]: e.target.value })); setSimulacaoProduto(null); }} className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-3 text-sm font-normal normal-case" /></label>)}</div></div>
             <div className="mt-7 flex justify-end"><button type="button" onClick={simularProduto} disabled={gravando} className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-black text-white disabled:opacity-50">{gravando ? 'Conferindo…' : 'Simular alteração'}</button></div>
             {simulacaoProduto && <div className="mt-6 rounded-2xl border-2 border-amber-300 bg-amber-50 p-5"><p className="text-xs font-black uppercase tracking-wider text-amber-700">Simulação — nenhuma gravação ainda</p><h4 className="mt-2 text-lg font-black">Corpo PATCH limitado</h4><pre className="mt-3 max-h-52 overflow-auto rounded-xl bg-slate-950 p-4 text-xs text-emerald-300">{JSON.stringify(simulacaoProduto.corpoPatch, null, 2)}</pre><p className="mt-4 text-sm font-semibold">Para aplicar, digite o SKU <strong>{produto.codigo}</strong>:</p><div className="mt-3 flex flex-wrap gap-2"><input value={confirmacaoProduto} onChange={e => setConfirmacaoProduto(e.target.value)} className="min-w-0 flex-1 rounded-xl border border-amber-300 bg-white px-4 py-3 font-mono text-sm" /><button type="button" onClick={aplicarProduto} disabled={gravando || confirmacaoProduto !== produto.codigo} className="rounded-xl bg-amber-600 px-5 py-3 text-sm font-black text-white disabled:opacity-40">Aplicar no Bling</button></div></div>}

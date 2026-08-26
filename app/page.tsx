@@ -38,6 +38,15 @@ const ETAPAS: EtapaFluxo[] = [
   { numero: 5, titulo: 'Enviar', descricao: 'Simule e envie os produtos ao Bling.' },
 ];
 
+const NAVEGACAO = [
+  ['dashboard', 'Visão geral', '◫'],
+  ['fluxo', 'Produtos', '◆'],
+  ['categorias', 'Catálogo', '≡'],
+  ['historico', 'Histórico', '↺'],
+  ['tarefas', 'Tarefas', '✓'],
+  ['configuracoes', 'Config.', '⚙'],
+] as const;
+
 const CORES_VARIANTES = new Set([
   'AMARELO', 'AMARELA', 'AZUL', 'BEGE', 'BRANCO', 'BRANCA', 'CINZA',
   'DOURADO', 'DOURADA', 'LARANJA', 'MARROM', 'NATURAL', 'PRETO', 'PRETA',
@@ -198,7 +207,7 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 
 export default function Home() {
   const router = useRouter();
-  const [visaoAtual, setVisaoAtual] = useState<'dashboard' | 'fluxo' | 'categorias' | 'historico' | 'tarefas' | 'configuracoes'>('fluxo');
+  const [visaoAtual, setVisaoAtual] = useState<'dashboard' | 'fluxo' | 'categorias' | 'historico' | 'tarefas' | 'configuracoes'>('dashboard');
   const [etapaAtual, setEtapaAtual] = useState(1);
   const [loteAprovado, setLoteAprovado] = useState(false);
   const [textoColado, setTextoColado] = useState('');
@@ -1083,9 +1092,9 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-[#f4f7f8] text-slate-950">
-      <header className="border-b border-white/10 bg-[#071a24] text-white shadow-[0_8px_30px_rgba(7,26,36,.18)]">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-5 md:px-8">
+    <main className="min-h-screen bg-[#f3f6f7] text-slate-950">
+      <header className="sticky top-0 z-40 border-b border-white/10 bg-[#071a24]/95 text-white shadow-[0_8px_30px_rgba(7,26,36,.18)] backdrop-blur-xl">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-3.5 md:px-8">
           <div className="flex items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-cyan-400 text-lg font-black text-[#071a24] shadow-sm">
               JB
@@ -1096,9 +1105,9 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {([['dashboard','Dashboard'],['fluxo','Produtos'],['categorias','Categorias'],['historico','Histórico'],['tarefas','Tarefas'],['configuracoes','Config.']] as const).map(([visao, rotulo]) => (
-              <button key={visao} type="button" onClick={() => setVisaoAtual(visao)} disabled={ocupado} aria-current={visaoAtual === visao ? 'page' : undefined} className={`hidden rounded-lg px-3 py-2 text-sm font-bold transition md:block ${visaoAtual === visao ? 'bg-cyan-400 text-[#071a24]' : 'text-slate-300 hover:bg-white/10 hover:text-white'} disabled:opacity-40`}>
-                {rotulo}
+            {NAVEGACAO.map(([visao, rotulo, icone]) => (
+              <button key={visao} type="button" onClick={() => setVisaoAtual(visao)} disabled={ocupado} aria-current={visaoAtual === visao ? 'page' : undefined} className={`hidden items-center gap-2 rounded-xl px-3 py-2 text-sm font-bold transition md:flex ${visaoAtual === visao ? 'bg-cyan-300 text-[#071a24] shadow-[0_4px_16px_rgba(103,232,249,.2)]' : 'text-slate-300 hover:bg-white/10 hover:text-white'} disabled:opacity-40`}>
+                <span aria-hidden="true" className="text-xs">{icone}</span>{rotulo}
               </button>
             ))}
             <button
@@ -1115,7 +1124,7 @@ export default function Home() {
 
       <div className="mx-auto max-w-7xl px-5 py-6 md:px-8 md:py-8">
         <div className="mb-5 flex gap-2 overflow-x-auto md:hidden">
-          {([['dashboard','Dashboard'],['fluxo','Produtos'],['categorias','Categorias'],['historico','Histórico'],['tarefas','Tarefas'],['configuracoes','Config.']] as const).map(([visao, rotulo]) => <button key={visao} onClick={() => setVisaoAtual(visao)} className={`shrink-0 rounded-lg px-3 py-2 text-sm font-bold ${visaoAtual === visao ? 'bg-slate-950 text-white' : 'bg-white text-slate-600'}`}>{rotulo}</button>)}
+          {NAVEGACAO.map(([visao, rotulo, icone]) => <button key={visao} onClick={() => setVisaoAtual(visao)} className={`shrink-0 rounded-xl px-3 py-2 text-sm font-bold ${visaoAtual === visao ? 'bg-slate-950 text-white' : 'border border-slate-200 bg-white text-slate-600'}`}><span aria-hidden="true" className="mr-1.5">{icone}</span>{rotulo}</button>)}
         </div>
         {visaoAtual === 'dashboard' && (
           <DashboardView

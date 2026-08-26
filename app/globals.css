@@ -1,8 +1,10 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f6f7f9;
-  --foreground: #171717;
+  --background: #f3f6f7;
+  --foreground: #10202b;
+  --brand-ink: #071a24;
+  --brand-cyan: #67e8f9;
 }
 
 @theme inline {
@@ -16,7 +18,8 @@
    então seguir o tema escuro do sistema deixava tudo ilegível. */
 body {
   background:
-    radial-gradient(circle at 8% 0%, rgba(34, 211, 238, .08), transparent 28rem),
+    radial-gradient(circle at 8% 0%, rgba(34, 211, 238, .10), transparent 30rem),
+    radial-gradient(circle at 94% 18%, rgba(14, 116, 144, .05), transparent 24rem),
     var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
@@ -27,3 +30,18 @@ button, input, textarea, select {
 }
 
 button:active:not(:disabled) { transform: translateY(1px); }
+
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 3px solid rgba(34, 211, 238, .28);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--brand-cyan);
+  color: var(--brand-ink);
+}
+
+* {
+  scrollbar-color: #94a3b8 transparent;
+  scrollbar-width: thin;
+}
