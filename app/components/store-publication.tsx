@@ -28,6 +28,18 @@ type Item = {
   status: string;
   motivo?: string | null;
 };
+type DiagnosticoCategoria = {
+  idProduto: number;
+  codigo: string;
+  produto: string;
+  categoria?: string | null;
+  idCategoriaInterna: number;
+  idMapeamento: number | null;
+  idCategoriaNoMapeamento: number | null;
+  idVinculo: number | null;
+  idsNoVinculo: number[];
+  situacao: 'SEM_VINCULO' | 'SEM_CATEGORIA' | 'USA_ID_INTERNO' | 'USA_ID_VINCULO_LOJA' | 'OUTRO_ID';
+};
 
 type Props = {
   categorias: CategoriaCatalogo[];
@@ -68,6 +80,7 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
   const [itens, setItens] = useState<Item[]>([]);
   const [execucoes, setExecucoes] = useState<Execucao[]>([]);
   const [confirmacao, setConfirmacao] = useState('');
+  const [diagnosticos, setDiagnosticos] = useState<DiagnosticoCategoria[]>([]);
   const [ocupado, setOcupado] = useState(false);
   const [executando, setExecutando] = useState(false);
   const continuarRef = useRef(false);
@@ -88,13 +101,14 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
     setSegmentoId(String(dados.execucao?.id_segmento_bling || ''));
     setLojaId(String(dados.execucao?.id_loja_bling || ''));
     setConfirmacao('');
+    setDiagnosticos([]);
   };
 
   const simular = async () => {
     const segmento = segmentos.find(item => String(item.id) === segmentoId);
     const loja = lojas.find(item => String(item.id) === lojaId);
     if (!segmento || !loja) { aoErro('Escolha o segmento e a Bling Loja Virtual.'); return; }
-    setOcupado(true); aoErro(''); aoMensagem(''); setExecucao(null); setItens([]);
+    setOcupado(true); aoErro(''); aoMensagem(''); setExecucao(null); setItens([]); setDiagnosticos([]);
     try {
       const dados = await jsonDaResposta(await fetch('/api/bling/publicacao', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -174,6 +188,23 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
     }
   };
 
+  const diagnosticarCategorias = async () => {
+    if (!execucao || confirmacao !== execucao.segmento || execucao.falhas === 0) return;
+    setOcupado(true); setDiagnosticos([]); aoErro(''); aoMensagem('Consultando os IDs no Bling sem alterar vínculos ou estados…');
+    try {
+      const dados = await jsonDaResposta(await fetch('/api/bling/publicacao', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acao: 'diagnosticar-categorias', id: execucao.id, confirmacao }),
+      }));
+      setDiagnosticos(dados.diagnosticos || []);
+      aoMensagem(`Diagnóstico somente leitura concluído para ${numero.format(Number(dados.total || 0))} item(ns). Nenhum dado foi alterado.`);
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'Não foi possível diagnosticar os IDs de categoria.');
+    } finally {
+      setOcupado(false);
+    }
+  };
+
   const bloqueios = useMemo(() => {
     const mapa = new Map<string, number>();
     itens.filter(item => item.status === 'BLOQUEADO').forEach(item => mapa.set(item.categoria || 'Sem categoria', (mapa.get(item.categoria || 'Sem categoria') || 0) + 1));
@@ -208,7 +239,9 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
 
         {bloqueios.length > 0 && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5"><p className="text-sm font-black text-rose-800">Categorias que precisam ser vinculadas uma única vez no Bling</p><p className="mt-1 text-xs leading-5 text-rose-700">Esses produtos não serão alterados até que a API confirme o vínculo da categoria interna com a categoria da loja.</p><div className="mt-3 flex flex-wrap gap-2">{bloqueios.map(([categoria, total]) => <span key={categoria} className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{categoria} · {total}</span>)}</div></div>}
 
-        {execucao.falhas > 0 && <div role="alert" className="rounded-2xl border border-rose-300 bg-rose-50 p-5"><p className="text-sm font-black text-rose-900">Segmento bloqueado por {numero.format(execucao.falhas)} item(ns) em revisão</p><p className="mt-1 text-xs leading-5 text-rose-700">A conferência abaixo consulta o Bling novamente, mas não cria nem altera vínculos. O processamento não poderá ser retomado enquanto houver itens incertos.</p><button type="button" onClick={reconciliar} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="mt-4 rounded-xl bg-rose-700 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{ocupado ? 'Conferindo…' : `Conferir ${numero.format(execucao.falhas)} itens em revisão`}</button></div>}
+        {execucao.falhas > 0 && <div role="alert" className="rounded-2xl border border-rose-300 bg-rose-50 p-5"><p className="text-sm font-black text-rose-900">Segmento bloqueado por {numero.format(execucao.falhas)} item(ns) em revisão</p><p className="mt-1 text-xs leading-5 text-rose-700">O diagnóstico compara os IDs sem gravar nada. A conferência também consulta o Bling novamente, mas pode atualizar somente o estado local quando encontrar um vínculo já correto.</p><div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={diagnosticarCategorias} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="rounded-xl border border-rose-300 bg-white px-5 py-3 text-sm font-black text-rose-800 disabled:opacity-40">{ocupado ? 'Consultando…' : 'Diagnosticar IDs de categoria'}</button><button type="button" onClick={reconciliar} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="rounded-xl bg-rose-700 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{ocupado ? 'Conferindo…' : `Conferir ${numero.format(execucao.falhas)} itens em revisão`}</button></div></div>}
+
+        {diagnosticos.length > 0 && <div className="overflow-hidden rounded-2xl border border-violet-200 bg-white shadow-sm"><div className="border-b border-violet-100 bg-violet-50 px-5 py-4"><p className="text-sm font-black text-violet-950">Diagnóstico somente leitura dos IDs</p><p className="mt-1 text-xs text-violet-700">Categoria interna, vínculo da categoria com a loja e categorias devolvidas no vínculo do produto. Nenhum registro foi alterado.</p></div><div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left text-sm"><thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">Produto</th><th className="px-4 py-3">Categoria interna</th><th className="px-4 py-3">Vínculo categoria-loja</th><th className="px-4 py-3">IDs no produto-loja</th><th className="px-5 py-3">Resultado</th></tr></thead><tbody>{diagnosticos.map(item => <tr key={`${item.idProduto}-${item.idVinculo || 'sem-vinculo'}`} className="border-t border-slate-100"><td className="px-5 py-3"><span className="font-mono text-xs font-black text-cyan-700">{item.codigo}</span><span className="mt-1 block font-bold">{item.produto}</span></td><td className="px-4 py-3"><span className="block text-slate-700">{item.categoria || 'Nome não informado'}</span><code className="text-xs font-bold text-slate-950">ID {item.idCategoriaInterna}</code></td><td className="px-4 py-3"><code className="text-xs font-bold text-slate-950">{item.idMapeamento ? `ID ${item.idMapeamento}` : 'Não encontrado'}</code>{item.idCategoriaNoMapeamento && <span className="mt-1 block text-xs text-slate-500">categoriaProduto.id: {item.idCategoriaNoMapeamento}</span>}</td><td className="px-4 py-3 font-mono text-xs font-bold text-slate-700">{item.idsNoVinculo.length ? item.idsNoVinculo.join(', ') : 'Nenhum'}</td><td className="px-5 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${item.situacao === 'USA_ID_INTERNO' ? selo('CORRETO') : selo('REVISAO')}`}>{item.situacao.replaceAll('_', ' ')}</span></td></tr>)}</tbody></table></div></div>}
 
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-end justify-between gap-4">
