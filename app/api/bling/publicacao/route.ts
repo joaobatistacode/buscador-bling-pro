@@ -142,6 +142,17 @@ function idsCategoriasDoVinculo(vinculo: Objeto) {
     .map(item => Number((item as Objeto)?.id || 0)).filter(Boolean);
 }
 
+async function mapeamentoExatoDaCategoria(idLoja: number, idCategoriaProduto: number, token: string) {
+  const encontrados = await listarTudo(`/categorias/lojas?idLoja=${idLoja}&idCategoriaProduto=${idCategoriaProduto}`, token, 5);
+  const exatos = encontrados.filter(item =>
+    Number((item.loja as Objeto | undefined)?.id || 0) === idLoja
+    && Number((item.categoriaProduto as Objeto | undefined)?.id || 0) === idCategoriaProduto
+  );
+  if (exatos.length === 0) throw new Error(`A subcategoria ${idCategoriaProduto} não possui vínculo exato com esta loja.`);
+  if (exatos.length > 1) throw new Error(`A subcategoria ${idCategoriaProduto} possui mais de um vínculo com esta loja. Corrija a duplicidade no Bling antes de continuar.`);
+  return { registro: exatos[0], id: inteiro(exatos[0].id, 'Vínculo categoria–loja') };
+}
+
 async function conferirCategoriaNoVinculo(
   idProduto: number,
   idLoja: number,
@@ -173,8 +184,8 @@ async function conferirCategoriaNoVinculo(
   return { confirmado: undefined, ultimoVinculo };
 }
 
-function corpoVinculo(atual: Objeto, idCategoria: number) {
-  const categorias = [...new Set([...idsCategoriasDoVinculo(atual), idCategoria])].map(id => ({ id }));
+function corpoVinculo(atual: Objeto, idCategoriaLoja: number) {
+  const categorias = [...new Set([...idsCategoriasDoVinculo(atual), idCategoriaLoja])].map(id => ({ id }));
   const corpo: Objeto = {
     codigo: textoSeguro(atual.codigo, 120),
     produto: { id: inteiro((atual.produto as Objeto | undefined)?.id, 'Produto do vínculo') },
@@ -251,17 +262,23 @@ export async function POST(request: Request) {
       const mapeamentos = await listarTudo(`/categorias/lojas?idLoja=${idLoja}`, token);
       await pausa(380);
       const vinculos = await listarTudo(`/produtos/lojas?idLoja=${idLoja}`, token);
-      const categoriasMapeadas = new Set(mapeamentos.map(item => Number((item.categoriaProduto as Objeto | undefined)?.id || 0)).filter(Boolean));
+      const mapeamentosPorCategoria = new Map<number, number>();
+      for (const item of mapeamentos) {
+        const idCategoria = Number((item.categoriaProduto as Objeto | undefined)?.id || 0);
+        const idMapeamento = Number(item.id || 0);
+        if (idCategoria > 0 && idMapeamento > 0) mapeamentosPorCategoria.set(idCategoria, idMapeamento);
+      }
       const vinculosPorProduto = new Map(vinculos.map(item => [Number((item.produto as Objeto | undefined)?.id || 0), item]));
       const nomesCategorias = new Map(categorias.map(item => [item.id, item.descricao]));
 
       const itens = produtos.map((produto, indice) => {
         const idCategoria = Number(produto.categoria?.id || 0);
+        const idMapeamento = Number(mapeamentosPorCategoria.get(idCategoria) || 0);
         const vinculo = vinculosPorProduto.get(produto.id);
         const categoriasVinculadas = vinculo ? idsCategoriasDoVinculo(vinculo) : [];
         const semCategoria = !idCategoria;
-        const semMapeamento = idCategoria > 0 && !categoriasMapeadas.has(idCategoria);
-        const correto = Boolean(vinculo && categoriasVinculadas.includes(idCategoria));
+        const semMapeamento = idCategoria > 0 && !idMapeamento;
+        const correto = Boolean(vinculo && categoriasVinculadas.includes(idMapeamento));
         const status = semCategoria || semMapeamento ? 'BLOQUEADO' : correto ? 'CORRETO' : 'PENDENTE';
         const acaoItem = status === 'BLOQUEADO' ? 'BLOQUEAR' : status === 'CORRETO' ? 'IGNORAR' : vinculo ? 'ATUALIZAR' : 'CRIAR';
         return {
@@ -379,6 +396,94 @@ export async function POST(request: Request) {
       return Response.json({ somenteLeitura: true, limite: 20, total: diagnosticos.length, diagnosticos });
     }
 
+    if (acao === 'testar-categoria-loja') {
+      const id = textoSeguro(pedido.id, 80);
+      const registro = await execucao(id);
+      const segmento = String(registro.segmento || '');
+      if (String(pedido.confirmacao || '').trim() !== segmento) throw new Error(`Digite exatamente ${segmento} para testar.`);
+      const token = await tokenDaSessao();
+      const idLoja = inteiro(registro.id_loja_bling, 'Loja');
+      const revisoes = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=eq.REVISAO&select=id,id_produto_bling,codigo,produto,id_categoria_produto,id_vinculo_loja,acao&order=posicao.asc&limit=1`, { method: 'GET' }) as ItemFila[];
+      const item = revisoes[0];
+      if (!item) throw new Error('Nenhum item em revisão está disponível para o teste controlado.');
+
+      const idProduto = inteiro(item.id_produto_bling, 'Produto');
+      const idCategoria = inteiro(item.id_categoria_produto, 'Categoria');
+      const mapeamento = await mapeamentoExatoDaCategoria(idLoja, idCategoria, token);
+      const atuais = await listarTudo(`/produtos/lojas?idProduto=${idProduto}&idLoja=${idLoja}`, token, 5);
+      const atual = atuais[0];
+      const reivindicado = await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}&status=eq.REVISAO`, {
+        method: 'PATCH', body: JSON.stringify({ status: 'PROCESSANDO', updated_at: new Date().toISOString() }),
+      });
+      if (!Array.isArray(reivindicado) || reivindicado.length !== 1) throw new Error('Este item já está sendo testado ou deixou a revisão. Recarregue a execução.');
+      let auditoria = '';
+      let requisicaoEnviada = false;
+
+      try {
+        const [registroAuditoria] = await supabaseRest('bling_catalogo_operacoes', {
+          method: 'POST', body: JSON.stringify({
+            tipo: 'VINCULAR_LOJA', status: 'PENDENTE', id_produto_bling: idProduto, codigo: item.codigo,
+            antes: atual || null,
+            solicitado: {
+              testeControlado: true,
+              loja: { id: idLoja },
+              categoriaProduto: { id: idCategoria },
+              categoriasProdutos: [{ id: mapeamento.id }],
+            },
+          }),
+        });
+        if (!registroAuditoria?.id) throw new Error('A auditoria não pôde ser aberta. Nenhum vínculo foi alterado.');
+        auditoria = String(registroAuditoria.id);
+
+        let idVinculoAlterado = Number(atual?.id || 0);
+        if (!idsCategoriasDoVinculo(atual || {}).includes(mapeamento.id)) {
+          await pausa(380);
+          requisicaoEnviada = true;
+          if (!atual) {
+            const criado = await chamarBling('/produtos/lojas', token, {
+              method: 'POST',
+              body: JSON.stringify({ codigo: item.codigo, produto: { id: idProduto }, loja: { id: idLoja }, categoriasProdutos: [{ id: mapeamento.id }] }),
+            });
+            idVinculoAlterado = Number(criado?.data?.id || 0);
+            if (!idVinculoAlterado) throw new Error('O Bling aceitou a criação, mas não devolveu o ID do vínculo para conferência.');
+          } else {
+            const idVinculo = inteiro(atual.id, 'Vínculo produto–loja');
+            idVinculoAlterado = idVinculo;
+            const detalhe = (await chamarBling(`/produtos/lojas/${idVinculo}`, token))?.data as Objeto;
+            await pausa(380);
+            await chamarBling(`/produtos/lojas/${idVinculo}`, token, { method: 'PUT', body: JSON.stringify(corpoVinculo(detalhe, mapeamento.id)) });
+          }
+        }
+
+        const { confirmado } = await conferirCategoriaNoVinculo(idProduto, idLoja, mapeamento.id, token, idVinculoAlterado || undefined, [0, 2_000, 5_000]);
+        if (!confirmado) throw new Error(`O teste foi enviado, mas o Bling não devolveu o vínculo categoria–loja ${mapeamento.id}. O segmento continua bloqueado.`);
+        await atualizarAuditoria(auditoria, 'SUCESSO', `Teste unitário confirmou o vínculo categoria–loja ${mapeamento.id}.`);
+        await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ status: 'CONCLUIDO', id_vinculo_loja: confirmado.id, motivo: `Teste unitário confirmou o vínculo categoria–loja ${mapeamento.id}.`, updated_at: new Date().toISOString() }),
+        });
+        const restantes = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=in.(FALHA,REVISAO)&select=id&limit=5000`, { method: 'GET' });
+        const falhasRestantes = Array.isArray(restantes) ? restantes.length : Math.max(0, Number(registro.falhas || 0) - 1);
+        await supabaseRest(`bling_publicacao_segmentos?id=eq.${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            status: 'PAUSADO',
+            concluidos: Number(registro.concluidos || 0) + 1,
+            falhas: falhasRestantes,
+            updated_at: new Date().toISOString(),
+          }),
+        });
+        return Response.json({ confirmado: true, somenteUmProduto: true, codigo: item.codigo, idProduto, idCategoriaProduto: idCategoria, idCategoriaLoja: mapeamento.id, falhasRestantes });
+      } catch (erro) {
+        const mensagem = erro instanceof Error ? erro.message : 'O teste controlado não pôde ser confirmado.';
+        if (auditoria) await atualizarAuditoria(auditoria, requisicaoEnviada ? 'REVISAO' : 'FALHA', mensagem).catch(() => null);
+        await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {
+          method: 'PATCH', body: JSON.stringify({ status: 'REVISAO', motivo: mensagem.slice(0, 1000), updated_at: new Date().toISOString() }),
+        }).catch(() => null);
+        throw erro;
+      }
+    }
+
     if (acao === 'reconciliar') {
       const id = textoSeguro(pedido.id, 80);
       const registro = await execucao(id);
@@ -387,6 +492,7 @@ export async function POST(request: Request) {
       const token = await tokenDaSessao();
       const idLoja = inteiro(registro.id_loja_bling, 'Loja');
       const revisoes = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=eq.REVISAO&select=id,id_produto_bling,codigo,produto,id_categoria_produto,id_vinculo_loja,acao&order=posicao.asc&limit=50`, { method: 'GET' }) as ItemFila[];
+      const idsMapeamento = new Map<number, number>();
       let confirmados = 0;
       let naoConfirmados = 0;
       let interrompido = '';
@@ -395,7 +501,12 @@ export async function POST(request: Request) {
         try {
           const idProduto = inteiro(item.id_produto_bling, 'Produto');
           const idCategoria = inteiro(item.id_categoria_produto, 'Categoria');
-          const conferencia = await conferirCategoriaNoVinculo(idProduto, idLoja, idCategoria, token, undefined, [0]);
+          let idMapeamento = idsMapeamento.get(idCategoria);
+          if (!idMapeamento) {
+            idMapeamento = (await mapeamentoExatoDaCategoria(idLoja, idCategoria, token)).id;
+            idsMapeamento.set(idCategoria, idMapeamento);
+          }
+          const conferencia = await conferirCategoriaNoVinculo(idProduto, idLoja, idMapeamento, token, undefined, [0]);
           if (!conferencia.confirmado) {
             const motivo = conferencia.ultimoVinculo
               ? 'O vínculo existe, mas continua sem a categoria esperada. Nenhuma gravação foi enviada na reconciliação.'
@@ -452,6 +563,7 @@ export async function POST(request: Request) {
       let corretos = 0;
       let falhas = 0;
       let interrompido = '';
+      const idsMapeamento = new Map<number, number>();
 
       for (const item of fila) {
         const reivindicado = await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}&status=eq.PENDENTE`, {
@@ -463,9 +575,14 @@ export async function POST(request: Request) {
         try {
           const idProduto = inteiro(item.id_produto_bling, 'Produto');
           const idCategoria = inteiro(item.id_categoria_produto, 'Categoria');
+          let idMapeamento = idsMapeamento.get(idCategoria);
+          if (!idMapeamento) {
+            idMapeamento = (await mapeamentoExatoDaCategoria(idLoja, idCategoria, token)).id;
+            idsMapeamento.set(idCategoria, idMapeamento);
+          }
           const atuais = await listarTudo(`/produtos/lojas?idProduto=${idProduto}&idLoja=${idLoja}`, token, 5);
           const atual = atuais[0];
-          if (atual && idsCategoriasDoVinculo(atual).includes(idCategoria)) {
+          if (atual && idsCategoriasDoVinculo(atual).includes(idMapeamento)) {
             await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {
               method: 'PATCH', body: JSON.stringify({ status: 'CORRETO', acao: 'IGNORAR', id_vinculo_loja: atual.id, motivo: 'O vínculo já estava correto na conferência final.', updated_at: new Date().toISOString() }),
             });
@@ -475,7 +592,8 @@ export async function POST(request: Request) {
           const [registroAuditoria] = await supabaseRest('bling_catalogo_operacoes', {
             method: 'POST', body: JSON.stringify({
               tipo: 'VINCULAR_LOJA', status: 'PENDENTE', id_produto_bling: idProduto, codigo: item.codigo,
-              antes: atual || null, solicitado: { loja: { id: idLoja }, categoriasProdutos: [{ id: idCategoria }] },
+              antes: atual || null,
+              solicitado: { loja: { id: idLoja }, categoriaProduto: { id: idCategoria }, categoriasProdutos: [{ id: idMapeamento }] },
             }),
           });
           if (!registroAuditoria?.id) throw new Error('A auditoria não pôde ser aberta. Nenhum vínculo foi alterado.');
@@ -486,7 +604,7 @@ export async function POST(request: Request) {
           if (!atual) {
             const criado = await chamarBling('/produtos/lojas', token, {
               method: 'POST',
-              body: JSON.stringify({ codigo: item.codigo, produto: { id: idProduto }, loja: { id: idLoja }, categoriasProdutos: [{ id: idCategoria }] }),
+              body: JSON.stringify({ codigo: item.codigo, produto: { id: idProduto }, loja: { id: idLoja }, categoriasProdutos: [{ id: idMapeamento }] }),
             });
             idVinculoAlterado = Number(criado?.data?.id || 0);
             if (!idVinculoAlterado) throw new Error('O Bling aceitou a criação, mas não devolveu o ID do vínculo para conferência.');
@@ -495,9 +613,9 @@ export async function POST(request: Request) {
             idVinculoAlterado = idVinculo;
             const detalhe = (await chamarBling(`/produtos/lojas/${idVinculo}`, token))?.data as Objeto;
             await pausa(380);
-            await chamarBling(`/produtos/lojas/${idVinculo}`, token, { method: 'PUT', body: JSON.stringify(corpoVinculo(detalhe, idCategoria)) });
+            await chamarBling(`/produtos/lojas/${idVinculo}`, token, { method: 'PUT', body: JSON.stringify(corpoVinculo(detalhe, idMapeamento)) });
           }
-          const { confirmado: conferido } = await conferirCategoriaNoVinculo(idProduto, idLoja, idCategoria, token, idVinculoAlterado, [0, 2_000, 5_000]);
+          const { confirmado: conferido } = await conferirCategoriaNoVinculo(idProduto, idLoja, idMapeamento, token, idVinculoAlterado, [0, 2_000, 5_000]);
           if (!conferido) throw new Error('O Bling respondeu, mas a categoria não apareceu na conferência posterior.');
           await atualizarAuditoria(auditoria, 'SUCESSO');
           await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {

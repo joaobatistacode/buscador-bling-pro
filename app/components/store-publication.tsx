@@ -205,6 +205,27 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
     }
   };
 
+  const testarCategoriaLoja = async () => {
+    if (!execucao || confirmacao !== execucao.segmento || execucao.falhas === 0 || diagnosticos.length === 0) return;
+    const primeiro = diagnosticos[0];
+    const confirmou = window.confirm(`Testar somente o produto ${primeiro.codigo}? O sistema enviará o vínculo categoria–loja ${primeiro.idMapeamento} e continuará bloqueando o restante do segmento.`);
+    if (!confirmou) return;
+    setOcupado(true); aoErro(''); aoMensagem(`Testando somente o produto ${primeiro.codigo}; os demais produtos permanecerão bloqueados…`);
+    try {
+      const dados = await jsonDaResposta(await fetch('/api/bling/publicacao', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acao: 'testar-categoria-loja', id: execucao.id, confirmacao }),
+      }));
+      await carregarExecucao(execucao.id);
+      await carregarExecucoes();
+      aoMensagem(`Teste confirmado no SKU ${dados.codigo}: a subcategoria ${dados.idCategoriaProduto} foi vinculada pelo ID categoria–loja ${dados.idCategoriaLoja}. Nenhum outro produto foi processado.`);
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'O teste controlado não pôde ser confirmado. O segmento continua bloqueado.');
+    } finally {
+      setOcupado(false);
+    }
+  };
+
   const bloqueios = useMemo(() => {
     const mapa = new Map<string, number>();
     itens.filter(item => item.status === 'BLOQUEADO').forEach(item => mapa.set(item.categoria || 'Sem categoria', (mapa.get(item.categoria || 'Sem categoria') || 0) + 1));
@@ -241,7 +262,14 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
 
         {execucao.falhas > 0 && <div role="alert" className="rounded-2xl border border-rose-300 bg-rose-50 p-5"><p className="text-sm font-black text-rose-900">Segmento bloqueado por {numero.format(execucao.falhas)} item(ns) em revisão</p><p className="mt-1 text-xs leading-5 text-rose-700">O diagnóstico compara os IDs sem gravar nada. A conferência também consulta o Bling novamente, mas pode atualizar somente o estado local quando encontrar um vínculo já correto.</p><div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={diagnosticarCategorias} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="rounded-xl border border-rose-300 bg-white px-5 py-3 text-sm font-black text-rose-800 disabled:opacity-40">{ocupado ? 'Consultando…' : 'Diagnosticar IDs de categoria'}</button><button type="button" onClick={reconciliar} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="rounded-xl bg-rose-700 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{ocupado ? 'Conferindo…' : `Conferir ${numero.format(execucao.falhas)} itens em revisão`}</button></div></div>}
 
-        {diagnosticos.length > 0 && <div className="overflow-hidden rounded-2xl border border-violet-200 bg-white shadow-sm"><div className="border-b border-violet-100 bg-violet-50 px-5 py-4"><p className="text-sm font-black text-violet-950">Diagnóstico somente leitura dos IDs</p><p className="mt-1 text-xs text-violet-700">Categoria interna, vínculo da categoria com a loja e categorias devolvidas no vínculo do produto. Nenhum registro foi alterado.</p></div><div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left text-sm"><thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">Produto</th><th className="px-4 py-3">Categoria interna</th><th className="px-4 py-3">Vínculo categoria-loja</th><th className="px-4 py-3">IDs no produto-loja</th><th className="px-5 py-3">Resultado</th></tr></thead><tbody>{diagnosticos.map(item => <tr key={`${item.idProduto}-${item.idVinculo || 'sem-vinculo'}`} className="border-t border-slate-100"><td className="px-5 py-3"><span className="font-mono text-xs font-black text-cyan-700">{item.codigo}</span><span className="mt-1 block font-bold">{item.produto}</span></td><td className="px-4 py-3"><span className="block text-slate-700">{item.categoria || 'Nome não informado'}</span><code className="text-xs font-bold text-slate-950">ID {item.idCategoriaInterna}</code></td><td className="px-4 py-3"><code className="text-xs font-bold text-slate-950">{item.idMapeamento ? `ID ${item.idMapeamento}` : 'Não encontrado'}</code>{item.idCategoriaNoMapeamento && <span className="mt-1 block text-xs text-slate-500">categoriaProduto.id: {item.idCategoriaNoMapeamento}</span>}</td><td className="px-4 py-3 font-mono text-xs font-bold text-slate-700">{item.idsNoVinculo.length ? item.idsNoVinculo.join(', ') : 'Nenhum'}</td><td className="px-5 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${item.situacao === 'USA_ID_INTERNO' ? selo('CORRETO') : selo('REVISAO')}`}>{item.situacao.replaceAll('_', ' ')}</span></td></tr>)}</tbody></table></div></div>}
+        {diagnosticos.length > 0 && <div className="overflow-hidden rounded-2xl border border-violet-200 bg-white shadow-sm">
+          <div className="border-b border-violet-100 bg-violet-50 px-5 py-4"><p className="text-sm font-black text-violet-950">Diagnóstico somente leitura dos IDs</p><p className="mt-1 text-xs text-violet-700">Categoria interna, vínculo da categoria com a loja e categorias devolvidas no vínculo do produto. Nenhum registro foi alterado.</p></div>
+          <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left text-sm"><thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">Produto</th><th className="px-4 py-3">Categoria interna</th><th className="px-4 py-3">Vínculo categoria-loja</th><th className="px-4 py-3">IDs no produto-loja</th><th className="px-5 py-3">Resultado</th></tr></thead><tbody>{diagnosticos.map(item => <tr key={`${item.idProduto}-${item.idVinculo || 'sem-vinculo'}`} className="border-t border-slate-100"><td className="px-5 py-3"><span className="font-mono text-xs font-black text-cyan-700">{item.codigo}</span><span className="mt-1 block font-bold">{item.produto}</span></td><td className="px-4 py-3"><span className="block text-slate-700">{item.categoria || 'Nome não informado'}</span><code className="text-xs font-bold text-slate-950">ID {item.idCategoriaInterna}</code></td><td className="px-4 py-3"><code className="text-xs font-bold text-slate-950">{item.idMapeamento ? `ID ${item.idMapeamento}` : 'Não encontrado'}</code>{item.idCategoriaNoMapeamento && <span className="mt-1 block text-xs text-slate-500">categoriaProduto.id: {item.idCategoriaNoMapeamento}</span>}</td><td className="px-4 py-3 font-mono text-xs font-bold text-slate-700">{item.idsNoVinculo.length ? item.idsNoVinculo.join(', ') : 'Nenhum'}</td><td className="px-5 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${item.situacao === 'USA_ID_VINCULO_LOJA' ? selo('CORRETO') : selo('REVISAO')}`}>{item.situacao.replaceAll('_', ' ')}</span></td></tr>)}</tbody></table></div>
+          <div className="border-t border-violet-100 bg-violet-50/60 px-5 py-4">
+            <p className="text-xs leading-5 text-violet-800">O teste abaixo altera somente o primeiro item em revisão e confere novamente antes de liberar o restante.</p>
+            <button type="button" onClick={testarCategoriaLoja} disabled={ocupado || executando || confirmacao !== execucao.segmento || !diagnosticos[0]?.idMapeamento} className="mt-3 rounded-xl bg-violet-700 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{ocupado ? 'Testando 1 produto…' : `Testar correção somente no SKU ${diagnosticos[0]?.codigo}`}</button>
+          </div>
+        </div>}
 
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-end justify-between gap-4">
