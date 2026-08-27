@@ -16,6 +16,29 @@ type ItemFila = {
 };
 
 const pausa = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const INTERVALO_BLING_MS = 750;
+let proximaChamadaBling = 0;
+let filaDoLimitador = Promise.resolve();
+
+async function aguardarLimiteBling() {
+  let liberar = () => {};
+  const chamadaAnterior = filaDoLimitador;
+  filaDoLimitador = new Promise<void>(resolve => { liberar = resolve; });
+  await chamadaAnterior;
+  const espera = Math.max(0, proximaChamadaBling - Date.now());
+  if (espera > 0) await pausa(espera);
+  proximaChamadaBling = Date.now() + INTERVALO_BLING_MS;
+  liberar();
+}
+
+function esperaDoBling(cabecalho: string | null, tentativa: number) {
+  const segundos = Number(cabecalho);
+  const informado = Number.isFinite(segundos)
+    ? segundos * 1_000
+    : cabecalho ? Date.parse(cabecalho) - Date.now() : 0;
+  const espera = informado > 0 ? informado : 5_000 * (tentativa + 1);
+  return Math.min(30_000, Math.max(5_000, espera));
+}
 
 function inteiro(valor: unknown, nome: string) {
   const numero = Number(valor);
@@ -30,19 +53,29 @@ async function tokenDaSessao() {
 }
 
 async function chamarBling(caminho: string, token: string, init: RequestInit = {}) {
-  const resposta = await fetch(`${BLING_API}${caminho}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...(init.headers || {}),
-    },
-    cache: 'no-store',
-    signal: AbortSignal.timeout(20_000),
-  });
-  const corpo = await resposta.json().catch(() => null);
-  if (!resposta.ok) {
+  const metodo = String(init.method || 'GET').toUpperCase();
+  const maximoTentativas = metodo === 'GET' ? 3 : 1;
+  for (let tentativa = 0; tentativa < maximoTentativas; tentativa++) {
+    await aguardarLimiteBling();
+    const resposta = await fetch(`${BLING_API}${caminho}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(init.headers || {}),
+      },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(20_000),
+    });
+    const corpo = await resposta.json().catch(() => null);
+    if (resposta.ok) return corpo;
+    if (resposta.status === 429 && metodo === 'GET' && tentativa + 1 < maximoTentativas) {
+      const espera = esperaDoBling(resposta.headers.get('retry-after'), tentativa);
+      console.warn('[bling/publicacao] limite temporário em leitura', { caminho, tentativa: tentativa + 1, espera });
+      await pausa(espera);
+      continue;
+    }
     const erro = corpo?.error;
     const campos = Array.isArray(erro?.fields)
       ? erro.fields.map((campo: Objeto) => `${campo.element || campo.field || '?'}: ${campo.msg || campo.message || 'inválido'}`).join(' | ')
@@ -51,7 +84,7 @@ async function chamarBling(caminho: string, token: string, init: RequestInit = {
     falha.status = resposta.status;
     throw falha;
   }
-  return corpo;
+  throw new Error('O limite de leitura do Bling permaneceu ativo após as tentativas seguras.');
 }
 
 async function listarTudo(caminho: string, token: string, maximoPaginas = 100) {
