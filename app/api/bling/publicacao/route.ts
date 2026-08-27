@@ -312,6 +312,73 @@ export async function POST(request: Request) {
       return Response.json({ pausado: true });
     }
 
+    if (acao === 'diagnosticar-categorias') {
+      const id = textoSeguro(pedido.id, 80);
+      const registro = await execucao(id);
+      const segmento = String(registro.segmento || '');
+      if (String(pedido.confirmacao || '').trim() !== segmento) throw new Error(`Digite exatamente ${segmento} para diagnosticar.`);
+      const token = await tokenDaSessao();
+      const idLoja = inteiro(registro.id_loja_bling, 'Loja');
+      const revisoes = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=eq.REVISAO&select=id,id_produto_bling,codigo,produto,id_categoria_produto,id_vinculo_loja,acao,categoria&order=posicao.asc&limit=20`, { method: 'GET' }) as (ItemFila & { categoria?: string | null })[];
+      const mapeamentosPorCategoria = new Map<number, Objeto | undefined>();
+      const diagnosticos = [];
+
+      for (const item of revisoes) {
+        const idProduto = inteiro(item.id_produto_bling, 'Produto');
+        const idCategoriaInterna = inteiro(item.id_categoria_produto, 'Categoria');
+        let mapeamento = mapeamentosPorCategoria.get(idCategoriaInterna);
+        if (!mapeamentosPorCategoria.has(idCategoriaInterna)) {
+          const encontrados = await listarTudo(`/categorias/lojas?idLoja=${idLoja}&idCategoriaProduto=${idCategoriaInterna}`, token, 5);
+          mapeamento = encontrados.find(candidato => Number((candidato.categoriaProduto as Objeto | undefined)?.id || 0) === idCategoriaInterna);
+          mapeamentosPorCategoria.set(idCategoriaInterna, mapeamento);
+        }
+
+        let vinculo: Objeto | undefined;
+        const idVinculoSalvo = Number(item.id_vinculo_loja || 0);
+        if (idVinculoSalvo > 0) {
+          try {
+            vinculo = (await chamarBling(`/produtos/lojas/${idVinculoSalvo}`, token))?.data as Objeto | undefined;
+          } catch (erro) {
+            if (Number((erro as { status?: number })?.status) !== 404) throw erro;
+          }
+        }
+        if (!vinculo) {
+          const encontrados = await listarTudo(`/produtos/lojas?idProduto=${idProduto}&idLoja=${idLoja}`, token, 5);
+          vinculo = encontrados[0];
+        }
+
+        const idMapeamento = Number(mapeamento?.id || 0) || null;
+        const idCategoriaNoMapeamento = Number((mapeamento?.categoriaProduto as Objeto | undefined)?.id || 0) || null;
+        const idsNoVinculo = vinculo ? idsCategoriasDoVinculo(vinculo) : [];
+        const usaIdInterno = idsNoVinculo.includes(idCategoriaInterna);
+        const usaIdMapeamento = Boolean(idMapeamento && idsNoVinculo.includes(idMapeamento));
+        const situacao = !vinculo
+          ? 'SEM_VINCULO'
+          : idsNoVinculo.length === 0
+            ? 'SEM_CATEGORIA'
+            : usaIdInterno
+              ? 'USA_ID_INTERNO'
+              : usaIdMapeamento
+                ? 'USA_ID_VINCULO_LOJA'
+                : 'OUTRO_ID';
+
+        diagnosticos.push({
+          idProduto,
+          codigo: item.codigo,
+          produto: item.produto,
+          categoria: item.categoria || null,
+          idCategoriaInterna,
+          idMapeamento,
+          idCategoriaNoMapeamento,
+          idVinculo: Number(vinculo?.id || 0) || null,
+          idsNoVinculo,
+          situacao,
+        });
+      }
+
+      return Response.json({ somenteLeitura: true, limite: 20, total: diagnosticos.length, diagnosticos });
+    }
+
     if (acao === 'reconciliar') {
       const id = textoSeguro(pedido.id, 80);
       const registro = await execucao(id);
