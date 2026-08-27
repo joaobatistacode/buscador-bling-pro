@@ -21,6 +21,7 @@ type Execucao = {
 };
 type Item = {
   id: string;
+  id_produto_bling: number;
   codigo: string;
   produto: string;
   categoria?: string | null;
@@ -55,6 +56,7 @@ async function jsonDaResposta(resposta: Response) {
 }
 
 const numero = new Intl.NumberFormat('pt-BR');
+const MARCADOR_TESTE_UNITARIO = 'Teste unitário confirmou o vínculo categoria–loja';
 
 function selo(status: string) {
   if (status === 'CONCLUIDO' || status === 'CORRETO' || status === 'FINALIZADO') return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
@@ -206,9 +208,10 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
   };
 
   const testarCategoriaLoja = async () => {
-    if (!execucao || confirmacao !== execucao.segmento || execucao.falhas === 0 || diagnosticos.length === 0) return;
-    const primeiro = diagnosticos[0];
-    const confirmou = window.confirm(`Testar somente o produto ${primeiro.codigo}? O sistema enviará o vínculo categoria–loja ${primeiro.idMapeamento} e continuará bloqueando o restante do segmento.`);
+    if (!execucao || confirmacao !== execucao.segmento) return;
+    const primeiro = itens.find(item => item.status === 'REVISAO') || itens.find(item => item.status === 'PENDENTE');
+    if (!primeiro) { aoErro('Nenhum produto está disponível para o teste unitário.'); return; }
+    const confirmou = window.confirm(`Testar somente o produto ${primeiro.codigo} (ID Bling ${primeiro.id_produto_bling})? O restante do segmento continuará bloqueado até a conferência terminar.`);
     if (!confirmou) return;
     setOcupado(true); aoErro(''); aoMensagem(`Testando somente o produto ${primeiro.codigo}; os demais produtos permanecerão bloqueados…`);
     try {
@@ -218,7 +221,8 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
       }));
       await carregarExecucao(execucao.id);
       await carregarExecucoes();
-      aoMensagem(`Teste confirmado no SKU ${dados.codigo}: a subcategoria ${dados.idCategoriaProduto} foi vinculada pelo ID categoria–loja ${dados.idCategoriaLoja}. Nenhum outro produto foi processado.`);
+      if (dados.jaEstavaCorreto) aoMensagem(`O SKU ${dados.codigo} já estava correto e não foi alterado. Faça o teste novamente para validar uma gravação real em apenas um produto.`);
+      else aoMensagem(`Teste confirmado no SKU ${dados.codigo}: a subcategoria ${dados.idCategoriaProduto} foi vinculada pelo ID categoria–loja ${dados.idCategoriaLoja}. Nenhum outro produto foi processado.`);
     } catch (erro) {
       aoErro(erro instanceof Error ? erro.message : 'O teste controlado não pôde ser confirmado. O segmento continua bloqueado.');
     } finally {
@@ -231,6 +235,22 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
     itens.filter(item => item.status === 'BLOQUEADO').forEach(item => mapa.set(item.categoria || 'Sem categoria', (mapa.get(item.categoria || 'Sem categoria') || 0) + 1));
     return [...mapa.entries()].sort((a, b) => b[1] - a[1]);
   }, [itens]);
+  const skusDuplicados = useMemo(() => {
+    const grupos = new Map<string, Item[]>();
+    for (const item of itens) {
+      const codigo = item.codigo.trim().toLocaleUpperCase('pt-BR');
+      if (!codigo) continue;
+      const grupo = grupos.get(codigo);
+      if (grupo) grupo.push(item);
+      else grupos.set(codigo, [item]);
+    }
+    return [...grupos.entries()]
+      .filter(([, grupo]) => new Set(grupo.map(item => item.id_produto_bling)).size > 1)
+      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0], 'pt-BR'));
+  }, [itens]);
+  const codigosDuplicados = useMemo(() => new Set(skusDuplicados.map(([codigo]) => codigo)), [skusDuplicados]);
+  const testeUnitarioConfirmado = itens.some(item => item.status === 'CONCLUIDO' && item.motivo?.startsWith(MARCADOR_TESTE_UNITARIO));
+  const candidatoTeste = itens.find(item => item.status === 'REVISAO') || itens.find(item => item.status === 'PENDENTE');
   const visiveis = itens.filter(item => item.status !== 'CORRETO').slice(0, 100);
 
   return (
@@ -260,27 +280,28 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
 
         {bloqueios.length > 0 && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5"><p className="text-sm font-black text-rose-800">Categorias que precisam ser vinculadas uma única vez no Bling</p><p className="mt-1 text-xs leading-5 text-rose-700">Esses produtos não serão alterados até que a API confirme o vínculo da categoria interna com a categoria da loja.</p><div className="mt-3 flex flex-wrap gap-2">{bloqueios.map(([categoria, total]) => <span key={categoria} className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{categoria} · {total}</span>)}</div></div>}
 
+        {skusDuplicados.length > 0 && <div role="alert" className="rounded-2xl border border-amber-300 bg-amber-50 p-5"><p className="text-sm font-black text-amber-950">{numero.format(skusDuplicados.length)} SKU(s) aparecem em mais de um cadastro do Bling</p><p className="mt-1 text-xs leading-5 text-amber-800">São produtos com o mesmo código, mas IDs internos diferentes. O sistema não junta nem exclui esses cadastros automaticamente; confira se a repetição é intencional.</p><div className="mt-3 flex max-h-40 flex-wrap gap-2 overflow-y-auto">{skusDuplicados.map(([codigo, grupo]) => <span key={codigo} className="rounded-xl bg-white px-3 py-2 text-xs font-bold text-amber-900 ring-1 ring-amber-200"><strong>{codigo}</strong> · {grupo.length} cadastros<span className="mt-1 block font-mono text-[10px] text-amber-700">IDs {grupo.map(item => item.id_produto_bling).join(', ')}</span></span>)}</div></div>}
+
         {execucao.falhas > 0 && <div role="alert" className="rounded-2xl border border-rose-300 bg-rose-50 p-5"><p className="text-sm font-black text-rose-900">Segmento bloqueado por {numero.format(execucao.falhas)} item(ns) em revisão</p><p className="mt-1 text-xs leading-5 text-rose-700">O diagnóstico compara os IDs sem gravar nada. A conferência também consulta o Bling novamente, mas pode atualizar somente o estado local quando encontrar um vínculo já correto.</p><div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={diagnosticarCategorias} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="rounded-xl border border-rose-300 bg-white px-5 py-3 text-sm font-black text-rose-800 disabled:opacity-40">{ocupado ? 'Consultando…' : 'Diagnosticar IDs de categoria'}</button><button type="button" onClick={reconciliar} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="rounded-xl bg-rose-700 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{ocupado ? 'Conferindo…' : `Conferir ${numero.format(execucao.falhas)} itens em revisão`}</button></div></div>}
 
         {diagnosticos.length > 0 && <div className="overflow-hidden rounded-2xl border border-violet-200 bg-white shadow-sm">
           <div className="border-b border-violet-100 bg-violet-50 px-5 py-4"><p className="text-sm font-black text-violet-950">Diagnóstico somente leitura dos IDs</p><p className="mt-1 text-xs text-violet-700">Categoria interna, vínculo da categoria com a loja e categorias devolvidas no vínculo do produto. Nenhum registro foi alterado.</p></div>
           <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left text-sm"><thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">Produto</th><th className="px-4 py-3">Categoria interna</th><th className="px-4 py-3">Vínculo categoria-loja</th><th className="px-4 py-3">IDs no produto-loja</th><th className="px-5 py-3">Resultado</th></tr></thead><tbody>{diagnosticos.map(item => <tr key={`${item.idProduto}-${item.idVinculo || 'sem-vinculo'}`} className="border-t border-slate-100"><td className="px-5 py-3"><span className="font-mono text-xs font-black text-cyan-700">{item.codigo}</span><span className="mt-1 block font-bold">{item.produto}</span></td><td className="px-4 py-3"><span className="block text-slate-700">{item.categoria || 'Nome não informado'}</span><code className="text-xs font-bold text-slate-950">ID {item.idCategoriaInterna}</code></td><td className="px-4 py-3"><code className="text-xs font-bold text-slate-950">{item.idMapeamento ? `ID ${item.idMapeamento}` : 'Não encontrado'}</code>{item.idCategoriaNoMapeamento && <span className="mt-1 block text-xs text-slate-500">categoriaProduto.id: {item.idCategoriaNoMapeamento}</span>}</td><td className="px-4 py-3 font-mono text-xs font-bold text-slate-700">{item.idsNoVinculo.length ? item.idsNoVinculo.join(', ') : 'Nenhum'}</td><td className="px-5 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${item.situacao === 'USA_ID_VINCULO_LOJA' ? selo('CORRETO') : selo('REVISAO')}`}>{item.situacao.replaceAll('_', ' ')}</span></td></tr>)}</tbody></table></div>
           <div className="border-t border-violet-100 bg-violet-50/60 px-5 py-4">
-            <p className="text-xs leading-5 text-violet-800">O teste abaixo altera somente o primeiro item em revisão e confere novamente antes de liberar o restante.</p>
-            <button type="button" onClick={testarCategoriaLoja} disabled={ocupado || executando || confirmacao !== execucao.segmento || !diagnosticos[0]?.idMapeamento} className="mt-3 rounded-xl bg-violet-700 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{ocupado ? 'Testando 1 produto…' : `Testar correção somente no SKU ${diagnosticos[0]?.codigo}`}</button>
+            <p className="text-xs leading-5 text-violet-800">Use o teste unitário da execução abaixo. O servidor continuará bloqueando o lote até confirmar uma gravação real em exatamente um produto.</p>
           </div>
         </div>}
 
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-end justify-between gap-4">
-            <div><p className="text-xs font-black uppercase tracking-wider text-blue-700">Simulação salva</p><h4 className="mt-1 text-xl font-black">{execucao.segmento} → {execucao.loja}</h4><span className={`mt-2 inline-block rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${selo(execucao.status)}`}>{execucao.status.replaceAll('_', ' ')}</span></div>
-            <div className="flex flex-wrap items-end gap-2"><label className="text-xs font-black text-slate-500">Digite “{execucao.segmento}” para liberar<input value={confirmacao} onChange={e => setConfirmacao(e.target.value)} disabled={executando || ocupado} className="mt-2 block min-w-60 rounded-xl border border-slate-300 px-3 py-2.5 text-sm font-normal text-slate-950" /></label>{executando ? <button type="button" onClick={pausar} className="rounded-xl bg-amber-500 px-5 py-3 text-sm font-black text-white">Parar com segurança</button> : <button type="button" onClick={executar} disabled={ocupado || confirmacao !== execucao.segmento || execucao.pendentes === 0 || execucao.falhas > 0} className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{execucao.falhas > 0 ? 'Reconcilie antes de retomar' : execucao.status === 'PAUSADO' ? 'Retomar segmento' : 'Vincular segmento'}</button>}</div>
+            <div><p className="text-xs font-black uppercase tracking-wider text-blue-700">Simulação salva</p><h4 className="mt-1 text-xl font-black">{execucao.segmento} → {execucao.loja}</h4><div className="mt-2 flex flex-wrap gap-2"><span className={`inline-block rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${selo(execucao.status)}`}>{execucao.status.replaceAll('_', ' ')}</span><span className={`inline-block rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${testeUnitarioConfirmado ? selo('CORRETO') : 'bg-amber-50 text-amber-700 ring-amber-200'}`}>{testeUnitarioConfirmado ? 'Teste unitário confirmado' : 'Lote bloqueado até o teste'}</span></div></div>
+            <div className="flex flex-wrap items-end gap-2"><label className="text-xs font-black text-slate-500">Digite “{execucao.segmento}” para liberar<input value={confirmacao} onChange={e => setConfirmacao(e.target.value)} disabled={executando || ocupado} className="mt-2 block min-w-60 rounded-xl border border-slate-300 px-3 py-2.5 text-sm font-normal text-slate-950" /></label>{!testeUnitarioConfirmado && candidatoTeste && <button type="button" onClick={testarCategoriaLoja} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="rounded-xl bg-violet-700 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{ocupado ? 'Testando 1 produto…' : `Testar somente SKU ${candidatoTeste.codigo}`}</button>}{executando ? <button type="button" onClick={pausar} className="rounded-xl bg-amber-500 px-5 py-3 text-sm font-black text-white">Parar com segurança</button> : <button type="button" onClick={executar} disabled={ocupado || confirmacao !== execucao.segmento || execucao.pendentes === 0 || execucao.falhas > 0 || !testeUnitarioConfirmado} className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{!testeUnitarioConfirmado ? 'Faça o teste de 1 produto' : execucao.falhas > 0 ? 'Reconcilie antes de retomar' : execucao.status === 'PAUSADO' ? 'Retomar segmento' : 'Vincular segmento'}</button>}</div>
           </div>
         </div>
 
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-200 px-5 py-4"><p className="text-sm font-black">Itens que exigem ação ou conferência</p><p className="mt-1 text-xs text-slate-500">Mostrando até 100 registros; os já corretos ficam ocultos desta tabela.</p></div>
-          <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">Produto</th><th className="px-4 py-3">Categoria</th><th className="px-4 py-3">Ação</th><th className="px-5 py-3">Situação</th></tr></thead><tbody>{visiveis.map(item => <tr key={item.id} className="border-t border-slate-100"><td className="px-5 py-3"><span className="font-mono text-xs font-black text-cyan-700">{item.codigo}</span><span className="mt-1 block font-bold">{item.produto}</span>{item.motivo && <span className="mt-1 block text-xs text-rose-600">{item.motivo}</span>}</td><td className="px-4 py-3 text-slate-600">{item.categoria || 'Sem categoria'}</td><td className="px-4 py-3 font-bold">{item.acao}</td><td className="px-5 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${selo(item.status)}`}>{item.status}</span></td></tr>)}</tbody></table></div>
+          <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">Produto</th><th className="px-4 py-3">Categoria</th><th className="px-4 py-3">Ação</th><th className="px-5 py-3">Situação</th></tr></thead><tbody>{visiveis.map(item => { const duplicado = codigosDuplicados.has(item.codigo.trim().toLocaleUpperCase('pt-BR')); return <tr key={item.id} className="border-t border-slate-100"><td className="px-5 py-3"><span className="font-mono text-xs font-black text-cyan-700">{item.codigo}</span>{duplicado && <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-black uppercase text-amber-800 ring-1 ring-amber-200">SKU repetido</span>}<span className="mt-1 block font-bold">{item.produto}</span><span className="mt-1 block font-mono text-[10px] text-slate-500">ID Bling {item.id_produto_bling}</span>{item.motivo && <span className="mt-1 block text-xs text-rose-600">{item.motivo}</span>}</td><td className="px-4 py-3 text-slate-600">{item.categoria || 'Sem categoria'}</td><td className="px-4 py-3 font-bold">{item.acao}</td><td className="px-5 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${selo(item.status)}`}>{item.status}</span></td></tr>; })}</tbody></table></div>
         </div>
       </>}
 
