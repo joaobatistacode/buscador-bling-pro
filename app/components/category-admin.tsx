@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { CategoryBrowser, type CategoriaCatalogo, type ProdutoCatalogo } from './category-browser';
+import { StorePublication } from './store-publication';
 
 type Categoria = CategoriaCatalogo;
 type Canal = { id: number; descricao: string; tipo: string; situacao: number };
@@ -56,7 +57,7 @@ function caminhoCategoria(id: number, categorias: Categoria[]) {
 }
 
 export function CategoryAdminView() {
-  const [secao, setSecao] = useState<'editor' | 'campos' | 'canais'>('editor');
+  const [secao, setSecao] = useState<'editor' | 'publicacao' | 'campos' | 'canais'>('editor');
   const [categorias, setCategorias] = useState<Categoria[]>([]);
   const [canais, setCanais] = useState<Canal[]>([]);
   const [modulos, setModulos] = useState<Modulo[]>([]);
@@ -220,17 +221,17 @@ export function CategoryAdminView() {
       <div className="overflow-hidden rounded-[28px] bg-[linear-gradient(125deg,#071a24,#0b3445_58%,#0c5263)] p-6 text-white shadow-[0_24px_70px_rgba(7,26,36,.20)] md:p-8">
         <p className="text-xs font-black uppercase tracking-[.22em] text-cyan-300">Administração do catálogo</p>
         <div className="mt-3 flex flex-wrap items-end justify-between gap-5">
-          <div><h2 className="max-w-3xl text-3xl font-black tracking-tight md:text-4xl">Categorias e campos para marketplaces</h2><p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">Organize o catálogo do Bling e consulte os atributos reais exigidos por Mercado Livre, Shopee e Amazon.</p></div>
+          <div><h2 className="max-w-3xl text-3xl font-black tracking-tight md:text-4xl">Categorias, lojas e marketplaces</h2><p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">Organize o catálogo, prepare um segmento por vez para a loja virtual e consulte os atributos dos marketplaces.</p></div>
           <button type="button" onClick={carregarResumo} disabled={carregando || gravando} className="rounded-xl bg-cyan-300 px-5 py-3 text-sm font-black text-[#071a24] disabled:opacity-50">{carregando ? 'Importando…' : 'Atualizar do Bling'}</button>
         </div>
       </div>
 
-      <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-6 text-amber-950"><strong>Proteção ativa:</strong> esta aba nunca usa PUT em produtos. Alterações são simuladas, assinadas, confirmadas pelo SKU e enviadas por PATCH apenas com <code>categoria</code> e <code>camposCustomizados</code>. Não existe alteração em massa nesta primeira versão.</div>
+      <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm leading-6 text-amber-950"><strong>Proteção ativa:</strong> o cadastro principal nunca usa PUT. Categoria e campos do produto continuam limitados a PATCH; a publicação em lote altera somente o recurso separado de vínculo produto–loja, sempre após simulação, auditoria e conferência posterior.</div>
       {erro && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-800">{erro}</div>}
       {mensagem && <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800">{mensagem}</div>}
 
       <div className="flex gap-2 overflow-x-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
-        {([['editor','Editor de produtos'],['campos','Campos customizados'],['canais','Mercado Livre, Shopee e Amazon']] as const).map(([id, rotulo]) => <button key={id} type="button" onClick={() => setSecao(id)} className={`shrink-0 rounded-xl px-4 py-2.5 text-sm font-black ${secao === id ? 'bg-[#071a24] text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{rotulo}</button>)}
+        {([['editor','Editor de produtos'],['publicacao','Publicação em lote'],['campos','Campos customizados'],['canais','Mercado Livre, Shopee e Amazon']] as const).map(([id, rotulo]) => <button key={id} type="button" onClick={() => setSecao(id)} className={`shrink-0 rounded-xl px-4 py-2.5 text-sm font-black ${secao === id ? 'bg-[#071a24] text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{rotulo}</button>)}
       </div>
 
       {secao === 'editor' && <div className="space-y-5">
@@ -249,6 +250,8 @@ export function CategoryAdminView() {
           </>}
         </div>
       </div>}
+
+      {secao === 'publicacao' && <StorePublication categorias={categorias} canais={canais} aoErro={setErro} aoMensagem={setMensagem} />}
 
       {secao === 'campos' && <div className="grid gap-5 xl:grid-cols-[1fr_380px]">
         <div className={`${cartao} p-6`}><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-black uppercase tracking-wider text-cyan-700">Importados do Bling</p><h3 className="mt-1 text-xl font-black">Campos do módulo Produtos</h3></div><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black">{campos.length}</span></div><div className="mt-5 divide-y divide-slate-100">{campos.map(campo => <div key={campo.id} className="flex items-center justify-between gap-4 py-3"><div><p className="font-bold">{campo.nome}</p><p className="font-mono text-xs text-slate-400">ID {campo.id}</p></div><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${campo.situacao === 0 ? 'bg-slate-100 text-slate-500' : 'bg-emerald-50 text-emerald-700'}`}>{campo.situacao === 0 ? 'Inativo' : 'Ativo'}</span></div>)}</div></div>
