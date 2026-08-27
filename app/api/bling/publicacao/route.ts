@@ -13,10 +13,12 @@ type ItemFila = {
   id_categoria_produto: number;
   id_vinculo_loja?: number | null;
   acao: 'CRIAR' | 'ATUALIZAR';
+  status?: 'PENDENTE' | 'REVISAO';
 };
 
 const pausa = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const INTERVALO_BLING_MS = 750;
+const MARCADOR_TESTE_UNITARIO = 'Teste unitário confirmou o vínculo categoria–loja';
 let proximaChamadaBling = 0;
 let filaDoLimitador = Promise.resolve();
 
@@ -204,6 +206,12 @@ async function execucao(id: string) {
   const registro = Array.isArray(linhas) ? linhas[0] as Objeto | undefined : undefined;
   if (!registro) throw new Error('Execução não encontrada.');
   return registro;
+}
+
+async function testeUnitarioConfirmado(idExecucao: string) {
+  const motivo = encodeURIComponent(`${MARCADOR_TESTE_UNITARIO}*`);
+  const itens = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(idExecucao)}&status=eq.CONCLUIDO&motivo=like.${motivo}&select=id&limit=1`, { method: 'GET' });
+  return Array.isArray(itens) && itens.length === 1;
 }
 
 async function atualizarAuditoria(id: string, status: string, detalhe?: string) {
@@ -401,18 +409,22 @@ export async function POST(request: Request) {
       const registro = await execucao(id);
       const segmento = String(registro.segmento || '');
       if (String(pedido.confirmacao || '').trim() !== segmento) throw new Error(`Digite exatamente ${segmento} para testar.`);
+      if (await testeUnitarioConfirmado(id)) throw new Error('O teste unitário desta execução já foi confirmado. Recarregue a tela para liberar o lote.');
       const token = await tokenDaSessao();
       const idLoja = inteiro(registro.id_loja_bling, 'Loja');
-      const revisoes = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=eq.REVISAO&select=id,id_produto_bling,codigo,produto,id_categoria_produto,id_vinculo_loja,acao&order=posicao.asc&limit=1`, { method: 'GET' }) as ItemFila[];
-      const item = revisoes[0];
-      if (!item) throw new Error('Nenhum item em revisão está disponível para o teste controlado.');
+      const selecao = 'select=id,id_produto_bling,codigo,produto,id_categoria_produto,id_vinculo_loja,acao,status&order=posicao.asc&limit=1';
+      const revisoes = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=eq.REVISAO&${selecao}`, { method: 'GET' }) as ItemFila[];
+      const pendentes = revisoes.length ? [] : await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=eq.PENDENTE&${selecao}`, { method: 'GET' }) as ItemFila[];
+      const item = revisoes[0] || pendentes[0];
+      if (!item) throw new Error('Nenhum item pendente ou em revisão está disponível para o teste controlado.');
+      const statusAnterior = item.status === 'REVISAO' ? 'REVISAO' : 'PENDENTE';
 
       const idProduto = inteiro(item.id_produto_bling, 'Produto');
       const idCategoria = inteiro(item.id_categoria_produto, 'Categoria');
       const mapeamento = await mapeamentoExatoDaCategoria(idLoja, idCategoria, token);
       const atuais = await listarTudo(`/produtos/lojas?idProduto=${idProduto}&idLoja=${idLoja}`, token, 5);
       const atual = atuais[0];
-      const reivindicado = await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}&status=eq.REVISAO`, {
+      const reivindicado = await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}&status=eq.${statusAnterior}`, {
         method: 'PATCH', body: JSON.stringify({ status: 'PROCESSANDO', updated_at: new Date().toISOString() }),
       });
       if (!Array.isArray(reivindicado) || reivindicado.length !== 1) throw new Error('Este item já está sendo testado ou deixou a revisão. Recarregue a execução.');
@@ -420,12 +432,31 @@ export async function POST(request: Request) {
       let requisicaoEnviada = false;
 
       try {
+        if (atual && idsCategoriasDoVinculo(atual).includes(mapeamento.id)) {
+          await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ status: 'CORRETO', acao: 'IGNORAR', id_vinculo_loja: atual.id, motivo: 'O vínculo já estava correto; nenhum teste de gravação foi realizado.', updated_at: new Date().toISOString() }),
+          });
+          await supabaseRest(`bling_publicacao_segmentos?id=eq.${encodeURIComponent(id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({
+              status: 'PAUSADO',
+              corretos: Number(registro.corretos || 0) + 1,
+              pendentes: Math.max(0, Number(registro.pendentes || 0) - (statusAnterior === 'PENDENTE' ? 1 : 0)),
+              falhas: Math.max(0, Number(registro.falhas || 0) - (statusAnterior === 'REVISAO' ? 1 : 0)),
+              updated_at: new Date().toISOString(),
+            }),
+          });
+          return Response.json({ confirmado: false, jaEstavaCorreto: true, codigo: item.codigo });
+        }
+
         const [registroAuditoria] = await supabaseRest('bling_catalogo_operacoes', {
           method: 'POST', body: JSON.stringify({
             tipo: 'VINCULAR_LOJA', status: 'PENDENTE', id_produto_bling: idProduto, codigo: item.codigo,
             antes: atual || null,
             solicitado: {
               testeControlado: true,
+              execucaoId: id,
               loja: { id: idLoja },
               categoriaProduto: { id: idCategoria },
               categoriasProdutos: [{ id: mapeamento.id }],
@@ -436,23 +467,21 @@ export async function POST(request: Request) {
         auditoria = String(registroAuditoria.id);
 
         let idVinculoAlterado = Number(atual?.id || 0);
-        if (!idsCategoriasDoVinculo(atual || {}).includes(mapeamento.id)) {
+        await pausa(380);
+        requisicaoEnviada = true;
+        if (!atual) {
+          const criado = await chamarBling('/produtos/lojas', token, {
+            method: 'POST',
+            body: JSON.stringify({ codigo: item.codigo, produto: { id: idProduto }, loja: { id: idLoja }, categoriasProdutos: [{ id: mapeamento.id }] }),
+          });
+          idVinculoAlterado = Number(criado?.data?.id || 0);
+          if (!idVinculoAlterado) throw new Error('O Bling aceitou a criação, mas não devolveu o ID do vínculo para conferência.');
+        } else {
+          const idVinculo = inteiro(atual.id, 'Vínculo produto–loja');
+          idVinculoAlterado = idVinculo;
+          const detalhe = (await chamarBling(`/produtos/lojas/${idVinculo}`, token))?.data as Objeto;
           await pausa(380);
-          requisicaoEnviada = true;
-          if (!atual) {
-            const criado = await chamarBling('/produtos/lojas', token, {
-              method: 'POST',
-              body: JSON.stringify({ codigo: item.codigo, produto: { id: idProduto }, loja: { id: idLoja }, categoriasProdutos: [{ id: mapeamento.id }] }),
-            });
-            idVinculoAlterado = Number(criado?.data?.id || 0);
-            if (!idVinculoAlterado) throw new Error('O Bling aceitou a criação, mas não devolveu o ID do vínculo para conferência.');
-          } else {
-            const idVinculo = inteiro(atual.id, 'Vínculo produto–loja');
-            idVinculoAlterado = idVinculo;
-            const detalhe = (await chamarBling(`/produtos/lojas/${idVinculo}`, token))?.data as Objeto;
-            await pausa(380);
-            await chamarBling(`/produtos/lojas/${idVinculo}`, token, { method: 'PUT', body: JSON.stringify(corpoVinculo(detalhe, mapeamento.id)) });
-          }
+          await chamarBling(`/produtos/lojas/${idVinculo}`, token, { method: 'PUT', body: JSON.stringify(corpoVinculo(detalhe, mapeamento.id)) });
         }
 
         const { confirmado } = await conferirCategoriaNoVinculo(idProduto, idLoja, mapeamento.id, token, idVinculoAlterado || undefined, [0, 2_000, 5_000]);
@@ -460,7 +489,7 @@ export async function POST(request: Request) {
         await atualizarAuditoria(auditoria, 'SUCESSO', `Teste unitário confirmou o vínculo categoria–loja ${mapeamento.id}.`);
         await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {
           method: 'PATCH',
-          body: JSON.stringify({ status: 'CONCLUIDO', id_vinculo_loja: confirmado.id, motivo: `Teste unitário confirmou o vínculo categoria–loja ${mapeamento.id}.`, updated_at: new Date().toISOString() }),
+          body: JSON.stringify({ status: 'CONCLUIDO', id_vinculo_loja: confirmado.id, motivo: `${MARCADOR_TESTE_UNITARIO} ${mapeamento.id}.`, updated_at: new Date().toISOString() }),
         });
         const restantes = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=in.(FALHA,REVISAO)&select=id&limit=5000`, { method: 'GET' });
         const falhasRestantes = Array.isArray(restantes) ? restantes.length : Math.max(0, Number(registro.falhas || 0) - 1);
@@ -470,6 +499,7 @@ export async function POST(request: Request) {
             status: 'PAUSADO',
             concluidos: Number(registro.concluidos || 0) + 1,
             falhas: falhasRestantes,
+            pendentes: Math.max(0, Number(registro.pendentes || 0) - (statusAnterior === 'PENDENTE' ? 1 : 0)),
             updated_at: new Date().toISOString(),
           }),
         });
@@ -478,8 +508,14 @@ export async function POST(request: Request) {
         const mensagem = erro instanceof Error ? erro.message : 'O teste controlado não pôde ser confirmado.';
         if (auditoria) await atualizarAuditoria(auditoria, requisicaoEnviada ? 'REVISAO' : 'FALHA', mensagem).catch(() => null);
         await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {
-          method: 'PATCH', body: JSON.stringify({ status: 'REVISAO', motivo: mensagem.slice(0, 1000), updated_at: new Date().toISOString() }),
+          method: 'PATCH', body: JSON.stringify({ status: statusAnterior === 'PENDENTE' ? (requisicaoEnviada ? 'REVISAO' : 'FALHA') : 'REVISAO', motivo: mensagem.slice(0, 1000), updated_at: new Date().toISOString() }),
         }).catch(() => null);
+        if (statusAnterior === 'PENDENTE') {
+          await supabaseRest(`bling_publicacao_segmentos?id=eq.${encodeURIComponent(id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ status: 'PAUSADO', pendentes: Math.max(0, Number(registro.pendentes || 0) - 1), falhas: Number(registro.falhas || 0) + 1, updated_at: new Date().toISOString() }),
+          }).catch(() => null);
+        }
         throw erro;
       }
     }
@@ -553,6 +589,7 @@ export async function POST(request: Request) {
       if (String(pedido.confirmacao || '').trim() !== segmento) throw new Error(`Digite exatamente ${segmento} para iniciar.`);
       if (registro.status === 'FINALIZADO' || registro.status === 'CANCELADO') throw new Error('Esta execução já foi encerrada.');
       if (Number(registro.falhas || 0) > 0) throw new Error('Existem itens em revisão. Faça a conferência somente leitura antes de retomar.');
+      if (!(await testeUnitarioConfirmado(id))) throw new Error('Lote bloqueado: confirme primeiro o teste unitário de um produto desta execução.');
       const token = await tokenDaSessao();
       const idLoja = inteiro(registro.id_loja_bling, 'Loja');
       await supabaseRest(`bling_publicacao_segmentos?id=eq.${encodeURIComponent(id)}`, {
