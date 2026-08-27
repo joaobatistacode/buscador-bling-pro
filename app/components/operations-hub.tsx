@@ -50,26 +50,34 @@ function BarraQualidade({ rotulo, valor, total, cor }: { rotulo: string; valor: 
   );
 }
 
-export function DashboardView({ geminiConfigurado, serperConfigurado }: { geminiConfigurado: boolean; serperConfigurado: boolean }) {
+type RevisaoAtual = { total: number; revisados: number; comErro: number; semFotos: number };
+
+export function DashboardView({ geminiConfigurado, serperConfigurado, revisaoAtual }: { geminiConfigurado: boolean; serperConfigurado: boolean; revisaoAtual: RevisaoAtual }) {
   const [dados, setDados] = useState<Painel | null>(null);
   const [erro, setErro] = useState('');
   const [enviados, setEnviados] = useState('0');
   const [pendentes, setPendentes] = useState('0');
   const [editando, setEditando] = useState(false);
   const [salvando, setSalvando] = useState(false);
+  const [atualizando, setAtualizando] = useState(true);
   const [mensagem, setMensagem] = useState('');
   const carregar = useCallback(async () => {
     setErro('');
-    const resposta = await fetch('/api/dashboard');
-    const retorno = await resposta.json();
-    if (!resposta.ok || retorno.erro) throw new Error(retorno.erro || 'Não foi possível carregar o painel.');
-    setDados(retorno);
-    setEnviados(String(retorno.operacao.enviados));
-    setPendentes(String(retorno.operacao.pendentes));
+    setAtualizando(true);
+    try {
+      const resposta = await fetch('/api/dashboard', { cache: 'no-store' });
+      const retorno = await resposta.json();
+      if (!resposta.ok || retorno.erro) throw new Error(retorno.erro || 'Não foi possível carregar o painel.');
+      setDados(retorno);
+      setEnviados(String(retorno.operacao.enviados));
+      setPendentes(String(retorno.operacao.pendentes));
+    } finally {
+      setAtualizando(false);
+    }
   }, []);
   useEffect(() => {
     let ativo = true;
-    fetch('/api/dashboard')
+    fetch('/api/dashboard', { cache: 'no-store' })
       .then(async resposta => ({ resposta, retorno: await resposta.json() }))
       .then(({ resposta, retorno }) => {
         if (!resposta.ok || retorno.erro) throw new Error(retorno.erro || 'Não foi possível carregar o painel.');
@@ -78,7 +86,8 @@ export function DashboardView({ geminiConfigurado, serperConfigurado }: { gemini
         setEnviados(String(retorno.operacao.enviados));
         setPendentes(String(retorno.operacao.pendentes));
       })
-      .catch(e => { if (ativo) setErro(e.message); });
+      .catch(e => { if (ativo) setErro(e instanceof Error ? e.message : 'Não foi possível carregar o painel.'); })
+      .finally(() => { if (ativo) setAtualizando(false); });
     return () => { ativo = false; };
   }, []);
   const salvarTotais = async () => {
@@ -91,8 +100,8 @@ export function DashboardView({ geminiConfigurado, serperConfigurado }: { gemini
     } catch (e) { setMensagem(e instanceof Error ? e.message : 'Não foi possível salvar.'); }
     finally { setSalvando(false); }
   };
-  if (erro) return <p className="rounded-xl bg-red-50 p-4 text-sm text-red-800">{erro}</p>;
-  if (!dados) return <p className="text-sm text-slate-500">Carregando indicadores…</p>;
+  if (erro && !dados) return <div className="rounded-2xl border border-red-200 bg-red-50 p-5 text-sm text-red-800"><p className="font-bold">O Dashboard não conseguiu carregar os indicadores.</p><p className="mt-1">{erro}</p><button type="button" onClick={() => void carregar().catch(e => setErro(e instanceof Error ? e.message : 'Não foi possível carregar o painel.'))} className="mt-4 rounded-xl bg-red-700 px-4 py-2 font-black text-white">Tentar novamente</button></div>;
+  if (!dados) return <div className="grid min-h-52 place-items-center rounded-2xl border border-slate-200 bg-white text-sm font-semibold text-slate-500">Carregando indicadores do Dashboard…</div>;
   const progresso = dados.operacao.total ? Math.round((dados.operacao.enviados / dados.operacao.total) * 100) : 0;
   const base = dados.qualidade.baseEnviados;
   const blingOnline = dados.integracoes.bling.api === 'ONLINE' || dados.integracoes.bling.api === 'LIMITADA';
@@ -108,6 +117,7 @@ export function DashboardView({ geminiConfigurado, serperConfigurado }: { gemini
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">Defina a base geral uma vez. Depois, cada novo envio concluído atualiza automaticamente os totais e a qualidade do catálogo.</p>
             <div className="mt-6 flex flex-wrap gap-3">
               <button type="button" onClick={() => setEditando(valor => !valor)} className="rounded-xl bg-cyan-300 px-4 py-2.5 text-sm font-black text-[#071a24] transition hover:bg-cyan-200">{editando ? 'Fechar edição' : 'Atualizar quantidades'}</button>
+              <button type="button" onClick={() => void carregar().catch(e => setErro(e instanceof Error ? e.message : 'Não foi possível atualizar o painel.'))} disabled={atualizando} className="rounded-xl border border-white/20 bg-white/5 px-4 py-2.5 text-sm font-black text-white transition hover:bg-white/10 disabled:opacity-50">{atualizando ? 'Atualizando…' : 'Atualizar painel'}</button>
               {dados.operacao.atualizadoEm ? <span className="self-center text-xs text-slate-400">Atualizado em {new Date(dados.operacao.atualizadoEm).toLocaleString('pt-BR')}</span> : null}
             </div>
           </div>
@@ -133,9 +143,15 @@ export function DashboardView({ geminiConfigurado, serperConfigurado }: { gemini
         {[
           ['Enviados', dados.operacao.enviados, 'base manual + novos envios', 'text-emerald-600', 'bg-emerald-50'],
           ['Ainda faltam', dados.operacao.pendentes, 'diminui após cada novo envio', 'text-orange-600', 'bg-orange-50'],
-          ['Na revisão atual', dados.historico.aguardandoRevisao, 'produtos ainda não enviados', 'text-blue-600', 'bg-blue-50'],
+          ['Na revisão atual', revisaoAtual.total, `${revisaoAtual.revisados} já conferidos neste navegador`, 'text-blue-600', 'bg-blue-50'],
           ['Tarefas abertas', dados.tarefas.pendentes, `${dados.tarefas.concluidas} já concluídas`, 'text-violet-600', 'bg-violet-50'],
         ].map(([rotulo, valor, detalhe, cor, fundo]) => <div key={String(rotulo)} className={`${classeCartao} relative overflow-hidden`}><span className={`absolute right-4 top-4 h-3 w-3 rounded-full ${fundo} ring-4 ring-current/5`} /><p className="text-sm font-bold text-slate-500">{rotulo}</p><p className={`mt-3 text-4xl font-black ${cor}`}>{numero.format(Number(valor))}</p><p className="mt-2 text-xs leading-5 text-slate-500">{detalhe}</p></div>)}
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-3">
+        <div className={`${classeCartao} border-blue-200 bg-blue-50/40`}><p className="text-xs font-black uppercase tracking-wider text-blue-700">Lote aberto neste navegador</p><p className="mt-2 text-3xl font-black text-slate-950">{numero.format(revisaoAtual.total)}</p><p className="mt-1 text-xs text-slate-500">Esta é a lista que aparece na aba Revisão.</p></div>
+        <div className={`${classeCartao} ${revisaoAtual.comErro ? 'border-rose-200 bg-rose-50/50' : ''}`}><p className="text-xs font-black uppercase tracking-wider text-rose-700">Produtos com erro</p><p className="mt-2 text-3xl font-black text-slate-950">{numero.format(revisaoAtual.comErro)}</p><p className="mt-1 text-xs text-slate-500">Falhas que precisam de conferência antes do envio.</p></div>
+        <div className={`${classeCartao} ${revisaoAtual.semFotos ? 'border-amber-200 bg-amber-50/50' : ''}`}><p className="text-xs font-black uppercase tracking-wider text-amber-700">Produtos sem fotos</p><p className="mt-2 text-3xl font-black text-slate-950">{numero.format(revisaoAtual.semFotos)}</p><p className="mt-1 text-xs text-slate-500">Itens do lote atual sem nenhuma imagem selecionada.</p></div>
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[1.15fr_.85fr]">
