@@ -154,6 +154,26 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
     }
   };
 
+  const reconciliar = async () => {
+    if (!execucao || confirmacao !== execucao.segmento || execucao.falhas === 0) return;
+    setOcupado(true); aoErro(''); aoMensagem('Conferindo os itens em revisão sem gravar no Bling…');
+    try {
+      const dados = await jsonDaResposta(await fetch('/api/bling/publicacao', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acao: 'reconciliar', id: execucao.id, confirmacao }),
+      }));
+      await carregarExecucao(execucao.id);
+      await carregarExecucoes();
+      if (dados.interrompido) aoErro(`Conferência interrompida: ${dados.interrompido}`);
+      else if (dados.restantes > 0) aoErro(`${dados.confirmados} vínculo(s) confirmado(s); ${dados.restantes} continuam em revisão. O segmento permanece bloqueado.`);
+      else aoMensagem(`${dados.confirmados} vínculo(s) confirmado(s) somente por leitura. O segmento pode ser retomado após nova confirmação.`);
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'Não foi possível reconciliar os itens.');
+    } finally {
+      setOcupado(false);
+    }
+  };
+
   const bloqueios = useMemo(() => {
     const mapa = new Map<string, number>();
     itens.filter(item => item.status === 'BLOQUEADO').forEach(item => mapa.set(item.categoria || 'Sem categoria', (mapa.get(item.categoria || 'Sem categoria') || 0) + 1));
@@ -188,10 +208,12 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
 
         {bloqueios.length > 0 && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5"><p className="text-sm font-black text-rose-800">Categorias que precisam ser vinculadas uma única vez no Bling</p><p className="mt-1 text-xs leading-5 text-rose-700">Esses produtos não serão alterados até que a API confirme o vínculo da categoria interna com a categoria da loja.</p><div className="mt-3 flex flex-wrap gap-2">{bloqueios.map(([categoria, total]) => <span key={categoria} className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{categoria} · {total}</span>)}</div></div>}
 
+        {execucao.falhas > 0 && <div role="alert" className="rounded-2xl border border-rose-300 bg-rose-50 p-5"><p className="text-sm font-black text-rose-900">Segmento bloqueado por {numero.format(execucao.falhas)} item(ns) em revisão</p><p className="mt-1 text-xs leading-5 text-rose-700">A conferência abaixo consulta o Bling novamente, mas não cria nem altera vínculos. O processamento não poderá ser retomado enquanto houver itens incertos.</p><button type="button" onClick={reconciliar} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="mt-4 rounded-xl bg-rose-700 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{ocupado ? 'Conferindo…' : `Conferir ${numero.format(execucao.falhas)} itens em revisão`}</button></div>}
+
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div><p className="text-xs font-black uppercase tracking-wider text-blue-700">Simulação salva</p><h4 className="mt-1 text-xl font-black">{execucao.segmento} → {execucao.loja}</h4><span className={`mt-2 inline-block rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${selo(execucao.status)}`}>{execucao.status.replaceAll('_', ' ')}</span></div>
-            <div className="flex flex-wrap items-end gap-2"><label className="text-xs font-black text-slate-500">Digite “{execucao.segmento}” para liberar<input value={confirmacao} onChange={e => setConfirmacao(e.target.value)} disabled={executando} className="mt-2 block min-w-60 rounded-xl border border-slate-300 px-3 py-2.5 text-sm font-normal text-slate-950" /></label>{executando ? <button type="button" onClick={pausar} className="rounded-xl bg-amber-500 px-5 py-3 text-sm font-black text-white">Parar com segurança</button> : <button type="button" onClick={executar} disabled={confirmacao !== execucao.segmento || execucao.pendentes === 0} className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{execucao.status === 'PAUSADO' ? 'Retomar segmento' : 'Vincular segmento'}</button>}</div>
+            <div className="flex flex-wrap items-end gap-2"><label className="text-xs font-black text-slate-500">Digite “{execucao.segmento}” para liberar<input value={confirmacao} onChange={e => setConfirmacao(e.target.value)} disabled={executando || ocupado} className="mt-2 block min-w-60 rounded-xl border border-slate-300 px-3 py-2.5 text-sm font-normal text-slate-950" /></label>{executando ? <button type="button" onClick={pausar} className="rounded-xl bg-amber-500 px-5 py-3 text-sm font-black text-white">Parar com segurança</button> : <button type="button" onClick={executar} disabled={ocupado || confirmacao !== execucao.segmento || execucao.pendentes === 0 || execucao.falhas > 0} className="rounded-xl bg-emerald-600 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{execucao.falhas > 0 ? 'Reconcilie antes de retomar' : execucao.status === 'PAUSADO' ? 'Retomar segmento' : 'Vincular segmento'}</button>}</div>
           </div>
         </div>
 
