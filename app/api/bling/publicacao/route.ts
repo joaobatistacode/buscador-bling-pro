@@ -142,6 +142,37 @@ function idsCategoriasDoVinculo(vinculo: Objeto) {
     .map(item => Number((item as Objeto)?.id || 0)).filter(Boolean);
 }
 
+async function conferirCategoriaNoVinculo(
+  idProduto: number,
+  idLoja: number,
+  idCategoria: number,
+  token: string,
+  idVinculo?: number,
+  esperas = [0]
+) {
+  let ultimoVinculo: Objeto | undefined;
+  for (const espera of esperas) {
+    if (espera > 0) await pausa(espera);
+    if (idVinculo) {
+      try {
+        const detalhe = (await chamarBling(`/produtos/lojas/${idVinculo}`, token))?.data as Objeto | undefined;
+        if (detalhe) ultimoVinculo = detalhe;
+      } catch (erro) {
+        if (Number((erro as { status?: number })?.status) !== 404) throw erro;
+      }
+      if (ultimoVinculo && idsCategoriasDoVinculo(ultimoVinculo).includes(idCategoria)) {
+        return { confirmado: ultimoVinculo, ultimoVinculo };
+      }
+      continue;
+    }
+    const vinculos = await listarTudo(`/produtos/lojas?idProduto=${idProduto}&idLoja=${idLoja}`, token, 5);
+    ultimoVinculo = vinculos[0];
+    const confirmado = vinculos.find(vinculo => idsCategoriasDoVinculo(vinculo).includes(idCategoria));
+    if (confirmado) return { confirmado, ultimoVinculo: confirmado };
+  }
+  return { confirmado: undefined, ultimoVinculo };
+}
+
 function corpoVinculo(atual: Objeto, idCategoria: number) {
   const categorias = [...new Set([...idsCategoriasDoVinculo(atual), idCategoria])].map(id => ({ id }));
   const corpo: Objeto = {
@@ -281,12 +312,69 @@ export async function POST(request: Request) {
       return Response.json({ pausado: true });
     }
 
+    if (acao === 'reconciliar') {
+      const id = textoSeguro(pedido.id, 80);
+      const registro = await execucao(id);
+      const segmento = String(registro.segmento || '');
+      if (String(pedido.confirmacao || '').trim() !== segmento) throw new Error(`Digite exatamente ${segmento} para conferir.`);
+      const token = await tokenDaSessao();
+      const idLoja = inteiro(registro.id_loja_bling, 'Loja');
+      const revisoes = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=eq.REVISAO&select=id,id_produto_bling,codigo,produto,id_categoria_produto,id_vinculo_loja,acao&order=posicao.asc&limit=50`, { method: 'GET' }) as ItemFila[];
+      let confirmados = 0;
+      let naoConfirmados = 0;
+      let interrompido = '';
+
+      for (const item of revisoes) {
+        try {
+          const idProduto = inteiro(item.id_produto_bling, 'Produto');
+          const idCategoria = inteiro(item.id_categoria_produto, 'Categoria');
+          const conferencia = await conferirCategoriaNoVinculo(idProduto, idLoja, idCategoria, token, undefined, [0]);
+          if (!conferencia.confirmado) {
+            const motivo = conferencia.ultimoVinculo
+              ? 'O vínculo existe, mas continua sem a categoria esperada. Nenhuma gravação foi enviada na reconciliação.'
+              : 'Nenhum vínculo foi localizado. Nenhuma gravação foi enviada na reconciliação.';
+            await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {
+              method: 'PATCH', body: JSON.stringify({ motivo, updated_at: new Date().toISOString() }),
+            });
+            naoConfirmados += 1;
+            continue;
+          }
+          await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ status: 'CONCLUIDO', id_vinculo_loja: conferencia.confirmado.id, motivo: 'Vínculo confirmado posteriormente por consulta somente leitura.', updated_at: new Date().toISOString() }),
+          });
+          const auditorias = await supabaseRest(`bling_catalogo_operacoes?tipo=eq.VINCULAR_LOJA&id_produto_bling=eq.${idProduto}&status=eq.REVISAO&select=id&order=created_at.desc&limit=1`, { method: 'GET' });
+          if (Array.isArray(auditorias) && auditorias[0]?.id) {
+            await atualizarAuditoria(String(auditorias[0].id), 'SUCESSO', 'Vínculo confirmado posteriormente por consulta somente leitura.');
+          }
+          confirmados += 1;
+        } catch (erro) {
+          interrompido = erro instanceof Error ? erro.message : 'A conferência somente leitura foi interrompida.';
+          break;
+        }
+      }
+
+      const restantes = await supabaseRest(`bling_publicacao_segmento_itens?execucao_id=eq.${encodeURIComponent(id)}&status=in.(FALHA,REVISAO)&select=id&limit=5000`, { method: 'GET' });
+      const falhasRestantes = Array.isArray(restantes) ? restantes.length : Number(registro.falhas || 0);
+      await supabaseRest(`bling_publicacao_segmentos?id=eq.${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          status: 'PAUSADO',
+          concluidos: Number(registro.concluidos || 0) + confirmados,
+          falhas: falhasRestantes,
+          updated_at: new Date().toISOString(),
+        }),
+      });
+      return Response.json({ somenteLeituraBling: true, analisados: confirmados + naoConfirmados, confirmados, naoConfirmados, restantes: falhasRestantes, interrompido });
+    }
+
     if (acao === 'aplicar-lote') {
       const id = textoSeguro(pedido.id, 80);
       const registro = await execucao(id);
       const segmento = String(registro.segmento || '');
       if (String(pedido.confirmacao || '').trim() !== segmento) throw new Error(`Digite exatamente ${segmento} para iniciar.`);
       if (registro.status === 'FINALIZADO' || registro.status === 'CANCELADO') throw new Error('Esta execução já foi encerrada.');
+      if (Number(registro.falhas || 0) > 0) throw new Error('Existem itens em revisão. Faça a conferência somente leitura antes de retomar.');
       const token = await tokenDaSessao();
       const idLoja = inteiro(registro.id_loja_bling, 'Loja');
       await supabaseRest(`bling_publicacao_segmentos?id=eq.${encodeURIComponent(id)}`, {
@@ -327,20 +415,22 @@ export async function POST(request: Request) {
           auditoria = String(registroAuditoria.id);
           await pausa(380);
           requisicaoEnviada = true;
+          let idVinculoAlterado = Number(atual?.id || 0);
           if (!atual) {
-            await chamarBling('/produtos/lojas', token, {
+            const criado = await chamarBling('/produtos/lojas', token, {
               method: 'POST',
               body: JSON.stringify({ codigo: item.codigo, produto: { id: idProduto }, loja: { id: idLoja }, categoriasProdutos: [{ id: idCategoria }] }),
             });
+            idVinculoAlterado = Number(criado?.data?.id || 0);
+            if (!idVinculoAlterado) throw new Error('O Bling aceitou a criação, mas não devolveu o ID do vínculo para conferência.');
           } else {
             const idVinculo = inteiro(atual.id, 'Vínculo produto–loja');
+            idVinculoAlterado = idVinculo;
             const detalhe = (await chamarBling(`/produtos/lojas/${idVinculo}`, token))?.data as Objeto;
             await pausa(380);
             await chamarBling(`/produtos/lojas/${idVinculo}`, token, { method: 'PUT', body: JSON.stringify(corpoVinculo(detalhe, idCategoria)) });
           }
-          await pausa(380);
-          const depois = await listarTudo(`/produtos/lojas?idProduto=${idProduto}&idLoja=${idLoja}`, token, 5);
-          const conferido = depois.find(vinculo => idsCategoriasDoVinculo(vinculo).includes(idCategoria));
+          const { confirmado: conferido } = await conferirCategoriaNoVinculo(idProduto, idLoja, idCategoria, token, idVinculoAlterado, [0, 2_000, 5_000]);
           if (!conferido) throw new Error('O Bling respondeu, mas a categoria não apareceu na conferência posterior.');
           await atualizarAuditoria(auditoria, 'SUCESSO');
           await supabaseRest(`bling_publicacao_segmento_itens?id=eq.${encodeURIComponent(item.id)}`, {
@@ -356,7 +446,7 @@ export async function POST(request: Request) {
             method: 'PATCH', body: JSON.stringify({ status: statusItem, motivo: mensagem.slice(0, 1000), updated_at: new Date().toISOString() }),
           }).catch(() => null);
           falhas += 1;
-          if ([401, 403, 429].includes(statusBling)) { interrompido = mensagem; break; }
+          if (requisicaoEnviada || [401, 403, 429].includes(statusBling)) { interrompido = mensagem; break; }
         }
       }
 
