@@ -1130,6 +1130,12 @@ export default function Home() {
           <DashboardView
             geminiConfigurado={Boolean(apiKeyGemini)}
             serperConfigurado={Boolean(apiKeyImg)}
+            revisaoAtual={{
+              total: resultados.length,
+              revisados: resultados.filter(produto => produto.revisado).length,
+              comErro,
+              semFotos: semImagem,
+            }}
           />
         )}
         {visaoAtual === 'historico' && <HistoryView aoAbrir={(produto) => {

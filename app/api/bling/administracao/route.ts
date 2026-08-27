@@ -136,7 +136,12 @@ async function listarProdutosDasCategorias(ids: number[], token: string, busca: 
       if (busca) parametros.set('nome', busca);
       const retorno = await chamarBling(`/produtos?${parametros}`, token);
       const lote = Array.isArray(retorno?.data) ? retorno.data : [];
-      for (const produto of lote) mapa.set(Number(produto.id), produto);
+      for (const produto of lote) {
+        const categoriaRetornada = produto?.categoria && typeof produto.categoria === 'object'
+          ? produto.categoria
+          : { id: idCategoria };
+        mapa.set(Number(produto.id), { ...produto, categoria: categoriaRetornada });
+      }
       if (lote.length < 100) break;
       if (pagina === 5) truncado = true;
     }

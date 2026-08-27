@@ -58,7 +58,7 @@ function baixarProdutos(produtos: ProdutoCatalogo[], categorias: CategoriaCatalo
   const porId = new Map(categorias.map(item => [item.id, item.descricao]));
   const linhas = [
     ['sku', 'produto', 'categoria', 'situacao'],
-    ...produtos.map(item => [item.codigo, item.nome, porId.get(Number(item.categoria?.id)) || 'Sem categoria', item.situacao || '']),
+    ...produtos.map(item => [item.codigo, item.nome, porId.get(Number(item.categoria?.id)) || 'Categoria não informada', item.situacao || '']),
   ];
   const csv = linhas.map(linha => linha.map(valor => {
     const seguro = /^[=+\-@]/.test(valor) ? `'${valor}` : valor;
@@ -99,6 +99,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
     : [], [categorias, nivelId, somenteNivel]);
   const porId = useMemo(() => new Map(categorias.map(item => [item.id, item])), [categorias]);
   const trilha = [segmentoAtualId, categoriaId, subcategoriaId].filter(Boolean).map(id => porId.get(Number(id))?.descricao).filter(Boolean).join(' › ');
+  const aguardandoDiagnostico = <span className="text-xs font-semibold text-slate-400">Clique em conferir</span>;
 
   const consultar = async () => {
     if (!idsConsulta.length) return;
@@ -220,6 +221,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
           </div>
         </div>
         {truncado && <div role="alert" className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-xs font-semibold text-amber-900">A consulta parou em 2.000 produtos. Refine por categoria para obter um balanço completo.</div>}
+        {produtos.length > 0 && <div className="border-b border-blue-100 bg-blue-50/70 px-5 py-2.5 text-xs font-semibold text-blue-800">Estoque, fotos e canais são conferidos para os 50 produtos da página visível. Use o botão acima em cada página.</div>}
         <div className="overflow-x-auto">
           <table className="w-full min-w-[820px] text-left text-sm">
             <thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">SKU / produto</th><th className="px-4 py-3">Categoria atual</th><th className="px-4 py-3">Estoque</th><th className="px-4 py-3">Tem foto</th><th className="px-4 py-3">Canais</th><th className="px-5 py-3 text-right">Ação</th></tr></thead>
@@ -227,10 +229,10 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
               const diagnostico = diagnosticos[item.id];
               return <tr key={item.id} className={`border-t border-slate-100 ${diagnostico?.alerta ? 'bg-rose-50/70' : produtoAberto === item.id ? 'bg-cyan-50' : ''}`}>
                 <td className="px-5 py-3"><span className="font-mono text-xs font-black text-cyan-700">{item.codigo}</span><span className="mt-1 block max-w-xl font-bold text-slate-900">{item.nome}</span>{diagnostico?.alerta && <span className="mt-1 inline-block rounded-full bg-rose-100 px-2 py-1 text-[10px] font-black uppercase text-rose-700">Com estoque, sem foto e fora dos canais</span>}</td>
-                <td className="px-4 py-3 text-slate-600">{porId.get(Number(item.categoria?.id))?.descricao || 'Sem categoria'}</td>
-                <td className="px-4 py-3 font-bold">{diagnostico ? diagnostico.saldoFisico.toLocaleString('pt-BR') : '—'}</td>
-                <td className="px-4 py-3">{diagnostico ? (diagnostico.quantidadeImagens ? <span className="font-bold text-emerald-700">Sim</span> : <span className="font-bold text-rose-700">Não</span>) : '—'}</td>
-                <td className="px-4 py-3">{diagnostico ? (diagnostico.canalConferido ? diagnostico.quantidadeCanais : <span className="font-bold text-amber-700">Não verificado</span>) : '—'}</td>
+                <td className="px-4 py-3 text-slate-600">{porId.get(Number(item.categoria?.id))?.descricao || <span className="font-semibold text-amber-700">Categoria não informada</span>}</td>
+                <td className="px-4 py-3 font-bold">{diagnostico ? diagnostico.saldoFisico.toLocaleString('pt-BR') : aguardandoDiagnostico}</td>
+                <td className="px-4 py-3">{diagnostico ? (diagnostico.quantidadeImagens ? <span className="font-bold text-emerald-700">Sim</span> : <span className="font-bold text-rose-700">Não</span>) : aguardandoDiagnostico}</td>
+                <td className="px-4 py-3">{diagnostico ? (diagnostico.canalConferido ? diagnostico.quantidadeCanais : <span className="font-bold text-amber-700">Não verificado</span>) : aguardandoDiagnostico}</td>
                 <td className="px-5 py-3 text-right"><button type="button" onClick={() => aoAbrir(item)} className="rounded-lg bg-[#071a24] px-3 py-2 text-xs font-black text-white">Abrir editor</button></td>
               </tr>;
             })}</tbody>
