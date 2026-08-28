@@ -10,8 +10,43 @@ import {
 import { supabaseRest } from '@/lib/supabase-admin';
 
 type Objeto = Record<string, unknown>;
+type FalhaApi = Error & { status?: number; codigo?: string };
 
 const pausa = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const INTERVALO_LEITURA_BLING_MS = 500;
+let filaLeiturasBling = Promise.resolve();
+let ultimaLeituraBling = 0;
+
+function falhaApi(mensagem: string, codigo: string) {
+  const falha = new Error(mensagem) as FalhaApi;
+  falha.codigo = codigo;
+  return falha;
+}
+
+async function aguardarJanelaDeLeitura(signal?: AbortSignal | null) {
+  let liberar: () => void = () => {};
+  const anterior = filaLeiturasBling;
+  filaLeiturasBling = new Promise<void>(resolve => { liberar = () => resolve(); });
+  await anterior;
+  try {
+    if (signal?.aborted) throw signal.reason || new DOMException('Consulta cancelada.', 'AbortError');
+    const espera = Math.max(0, ultimaLeituraBling + INTERVALO_LEITURA_BLING_MS - Date.now());
+    if (espera) await pausa(espera);
+    if (signal?.aborted) throw signal.reason || new DOMException('Consulta cancelada.', 'AbortError');
+    ultimaLeituraBling = Date.now();
+  } finally {
+    liberar();
+  }
+}
+
+function esperaAposLimite(resposta: Response, tentativa: number) {
+  const retryAfter = resposta.headers.get('retry-after');
+  const segundos = Number(retryAfter);
+  if (retryAfter !== null && Number.isFinite(segundos) && segundos >= 0) return Math.min(10_000, Math.max(1_000, segundos * 1_000));
+  const data = retryAfter ? Date.parse(retryAfter) : Number.NaN;
+  if (Number.isFinite(data)) return Math.min(10_000, Math.max(1_000, data - Date.now()));
+  return Math.min(8_000, 1_000 * (2 ** tentativa));
+}
 
 function inteiro(valor: unknown, nome: string) {
   const numero = Number(valor);
@@ -49,48 +84,63 @@ function assinar(dados: Objeto) {
 
 function conferirAssinatura(token: unknown): Objeto {
   const partes = String(token || '').split('.');
-  if (partes.length !== 2) throw new Error('Simulação inválida. Simule novamente.');
+  if (partes.length !== 2) throw falhaApi('Simulação inválida. Simule novamente.', 'SIMULACAO_INVALIDA');
   const esperada = createHmac('sha256', segredoAssinatura()).update(partes[0]).digest();
   let recebida: Buffer;
-  try { recebida = Buffer.from(partes[1], 'base64url'); } catch { throw new Error('Simulação inválida.'); }
+  try { recebida = Buffer.from(partes[1], 'base64url'); } catch { throw falhaApi('Simulação inválida. Simule novamente.', 'SIMULACAO_INVALIDA'); }
   if (recebida.length !== esperada.length || !timingSafeEqual(recebida, esperada)) {
-    throw new Error('A simulação foi alterada ou não é válida.');
+    throw falhaApi('A simulação foi alterada ou não é válida. Simule novamente.', 'SIMULACAO_INVALIDA');
   }
-  const dados = JSON.parse(Buffer.from(partes[0], 'base64url').toString('utf8')) as Objeto;
-  if (Number(dados.expiraEm) < Date.now()) throw new Error('A simulação expirou. Simule novamente.');
+  let dados: Objeto;
+  try {
+    dados = JSON.parse(Buffer.from(partes[0], 'base64url').toString('utf8')) as Objeto;
+  } catch {
+    throw falhaApi('Simulação inválida. Simule novamente.', 'SIMULACAO_INVALIDA');
+  }
+  if (Number(dados.expiraEm) < Date.now()) throw falhaApi('A simulação expirou. Simule novamente.', 'SIMULACAO_EXPIRADA');
   return dados;
 }
 
 async function chamarBling(caminho: string, token: string, init: RequestInit = {}) {
-  const resposta = await fetch(`${BLING_API}${caminho}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...(init.headers || {}),
-    },
-    cache: 'no-store',
-    signal: AbortSignal.timeout(20_000),
-  });
-  const corpo = await resposta.json().catch(() => null);
-  if (!resposta.ok) {
+  const metodo = String(init.method || 'GET').toUpperCase();
+  const somenteLeitura = metodo === 'GET';
+  const maximoTentativas = somenteLeitura ? 4 : 1;
+  for (let tentativa = 0; tentativa < maximoTentativas; tentativa++) {
+    if (somenteLeitura) await aguardarJanelaDeLeitura(init.signal);
+    const timeout = AbortSignal.timeout(20_000);
+    const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    const resposta = await fetch(`${BLING_API}${caminho}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(init.headers || {}),
+      },
+      cache: 'no-store',
+      signal,
+    });
+    const corpo = await resposta.json().catch(() => null);
+    if (resposta.ok) return corpo;
+    if (somenteLeitura && resposta.status === 429 && tentativa + 1 < maximoTentativas) {
+      await pausa(esperaAposLimite(resposta, tentativa));
+      continue;
+    }
     const erro = corpo?.error;
     const campos = Array.isArray(erro?.fields)
       ? erro.fields.map((campo: Objeto) => `${campo.element || campo.field || '?'}: ${campo.msg || campo.message || 'inválido'}`).join(' | ')
       : '';
     const motivo = [erro?.description || erro?.message || `HTTP ${resposta.status}`, campos].filter(Boolean).join(' — ');
-    const falha = new Error(motivo) as Error & { status?: number };
+    const falha = new Error(motivo) as FalhaApi;
     falha.status = resposta.status;
     throw falha;
   }
-  return corpo;
+  throw new Error('O limite de leituras do Bling permaneceu ativo após as tentativas seguras.');
 }
 
 async function listarTudo(caminho: string, token: string, maximoPaginas = 100) {
   const itens: unknown[] = [];
   for (let pagina = 1; pagina <= maximoPaginas; pagina++) {
-    if (pagina > 1) await pausa(360);
     const separador = caminho.includes('?') ? '&' : '?';
     const retorno = await chamarBling(`${caminho}${separador}pagina=${pagina}&limite=100`, token);
     const lote = Array.isArray(retorno?.data) ? retorno.data : [];
@@ -123,18 +173,17 @@ function idsPositivos(valor: string | null, limite = 200) {
   return ids;
 }
 
-async function listarProdutosDasCategorias(ids: number[], token: string, busca: string) {
+async function listarProdutosDasCategorias(ids: number[], token: string, busca: string, signal?: AbortSignal) {
   const mapa = new Map<number, unknown>();
   let truncado = false;
   for (const idCategoria of ids) {
     for (let pagina = 1; pagina <= 5; pagina++) {
       if (mapa.size >= 2_000) { truncado = true; break; }
-      if (mapa.size || pagina > 1) await pausa(360);
       const parametros = new URLSearchParams({
         pagina: String(pagina), limite: '100', criterio: '5', tipo: 'T', idCategoria: String(idCategoria),
       });
       if (busca) parametros.set('nome', busca);
-      const retorno = await chamarBling(`/produtos?${parametros}`, token);
+      const retorno = await chamarBling(`/produtos?${parametros}`, token, { signal });
       const lote = Array.isArray(retorno?.data) ? retorno.data : [];
       for (const produto of lote) {
         const categoriaRetornada = produto?.categoria && typeof produto.categoria === 'object'
@@ -148,8 +197,7 @@ async function listarProdutosDasCategorias(ids: number[], token: string, busca: 
     if (mapa.size >= 2_000) break;
   }
   if (busca) {
-    await pausa(360);
-    const porCodigo = await chamarBling(`/produtos?pagina=1&limite=5&criterio=5&codigos[]=${encodeURIComponent(busca)}`, token);
+    const porCodigo = await chamarBling(`/produtos?pagina=1&limite=5&criterio=5&codigos[]=${encodeURIComponent(busca)}`, token, { signal });
     const permitidas = new Set(ids);
     for (const produto of Array.isArray(porCodigo?.data) ? porCodigo.data : []) {
       if (permitidas.has(Number(produto?.categoria?.id || 0))) mapa.set(Number(produto.id), produto);
@@ -266,7 +314,8 @@ function retratoSemMidia(produto: Objeto) {
 function respostaErro(erro: unknown) {
   const statusBling = Number((erro as { status?: number })?.status);
   const status = statusBling === 429 ? 429 : statusBling === 401 || statusBling === 403 ? 401 : 400;
-  return Response.json({ erro: erro instanceof Error ? erro.message : 'Falha na administração do catálogo.' }, { status });
+  const codigo = (erro as FalhaApi)?.codigo;
+  return Response.json({ erro: erro instanceof Error ? erro.message : 'Falha na administração do catálogo.', ...(codigo ? { codigo } : {}) }, { status });
 }
 
 async function iniciarAuditoria(dados: Objeto) {
@@ -294,11 +343,8 @@ export async function GET(request: Request) {
 
     if (recurso === 'resumo') {
       const categorias = await listarTudo('/categorias/produtos', token);
-      await pausa(360);
       const canaisResultado = await consultaOpcional('Canais de venda', () => listarTudo('/canais-venda?situacao=1', token, 20));
-      await pausa(360);
       const modulosResultado = await consultaOpcional('Módulos de campos', async () => (await chamarBling('/campos-customizados/modulos', token))?.data || []);
-      await pausa(360);
       const tiposResultado = await consultaOpcional('Tipos de campos', async () => (await chamarBling('/campos-customizados/tipos', token))?.data || []);
       return Response.json({
         categorias,
@@ -314,7 +360,7 @@ export async function GET(request: Request) {
       const categorias = idsPositivos(url.searchParams.get('categorias'));
       const busca = String(url.searchParams.get('q') || '').trim().slice(0, 120);
       if (categorias.length) {
-        const retorno = await listarProdutosDasCategorias(categorias, token, busca);
+        const retorno = await listarProdutosDasCategorias(categorias, token, busca, request.signal);
         return Response.json(retorno);
       }
       const parametros = new URLSearchParams({ pagina: '1', limite: '50', criterio: '5', tipo: 'T' });
@@ -323,7 +369,6 @@ export async function GET(request: Request) {
       const retorno = await chamarBling(`/produtos?${parametros}`, token);
       let produtos = Array.isArray(retorno?.data) ? retorno.data : [];
       if (busca) {
-        await pausa(360);
         const porCodigo = await chamarBling(`/produtos?pagina=1&limite=5&criterio=5&codigos[]=${encodeURIComponent(busca)}`, token);
         const mapa = new Map<number, unknown>();
         for (const produto of [...(porCodigo?.data || []), ...produtos]) mapa.set(Number(produto.id), produto);
@@ -340,7 +385,6 @@ export async function GET(request: Request) {
       ids.forEach(id => parametrosLote.append('idsProdutos[]', String(id)));
       const produtosRetorno = await chamarBling(`/produtos?${parametrosLote}`, token);
       const produtos = new Map<number, Objeto>((Array.isArray(produtosRetorno?.data) ? produtosRetorno.data : []).map((item: Objeto) => [Number(item.id), item]));
-      await pausa(360);
       const parametrosSaldo = new URLSearchParams();
       ids.forEach(id => parametrosSaldo.append('idsProdutos[]', String(id)));
       const saldosRetorno = await chamarBling(`/estoques/saldos?${parametrosSaldo}`, token);
@@ -348,7 +392,6 @@ export async function GET(request: Request) {
       const diagnosticos: Objeto[] = [];
 
       for (const id of ids) {
-        await pausa(360);
         const produto = produtos.get(id) || {};
         let vinculos: unknown[] = [];
         let canalConferido = true;
@@ -465,7 +508,7 @@ export async function POST(request: Request) {
       const idProduto = inteiro(plano.idProduto, 'Produto');
       const antes = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
       if (!antes || hash(antes) !== plano.hashAtual) {
-        throw new Error('O produto mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.');
+        throw falhaApi('O produto mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.', 'SIMULACAO_DESATUALIZADA');
       }
       const linksAtuais = linksDasImagens(antes);
       const linksNovos = validarNovasImagens(plano.linksNovos, linksAtuais.length);
