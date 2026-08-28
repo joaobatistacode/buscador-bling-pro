@@ -311,6 +311,24 @@ function retratoSemMidia(produto: Objeto) {
   return copia;
 }
 
+function linkEstavelDaImagem(link: string) {
+  try {
+    const url = new URL(link);
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return link;
+  }
+}
+
+function retratoParaSimulacaoDeImagens(produto: Objeto) {
+  return {
+    produto: retratoSemMidia(produto),
+    imagens: linksDasImagens(produto).map(linkEstavelDaImagem),
+  };
+}
+
 function respostaErro(erro: unknown) {
   const statusBling = Number((erro as { status?: number })?.status);
   const status = statusBling === 429 ? 429 : statusBling === 401 || statusBling === 403 ? 401 : 400;
@@ -487,7 +505,7 @@ export async function POST(request: Request) {
         codigo,
         linksAtuais,
         linksNovos,
-        hashAtual: hash(atual),
+        hashAtual: hash(retratoParaSimulacaoDeImagens(atual)),
         expiraEm: Date.now() + 10 * 60 * 1000,
       };
       return Response.json({
@@ -507,7 +525,7 @@ export async function POST(request: Request) {
       if (String(pedido.confirmacao || '').trim() !== codigo) throw new Error(`Digite exatamente o SKU ${codigo} para confirmar.`);
       const idProduto = inteiro(plano.idProduto, 'Produto');
       const antes = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
-      if (!antes || hash(antes) !== plano.hashAtual) {
+      if (!antes || hash(retratoParaSimulacaoDeImagens(antes)) !== plano.hashAtual) {
         throw falhaApi('O produto mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.', 'SIMULACAO_DESATUALIZADA');
       }
       const linksAtuais = linksDasImagens(antes);
