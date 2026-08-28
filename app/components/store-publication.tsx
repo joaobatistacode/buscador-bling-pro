@@ -29,6 +29,14 @@ type Item = {
   status: string;
   motivo?: string | null;
 };
+type GrupoSkuDuplicado = {
+  codigo: string;
+  itens: Item[];
+  nomesDistintos: number;
+  categoriasDistintas: number;
+  conflitoNome: boolean;
+  conflitoCategoria: boolean;
+};
 type DiagnosticoCategoria = {
   idProduto: number;
   codigo: string;
@@ -63,6 +71,25 @@ function selo(status: string) {
   if (status === 'BLOQUEADO' || status === 'FALHA' || status === 'REVISAO') return 'bg-rose-50 text-rose-700 ring-rose-200';
   if (status === 'PROCESSANDO' || status === 'EM_ANDAMENTO') return 'bg-blue-50 text-blue-700 ring-blue-200';
   return 'bg-amber-50 text-amber-700 ring-amber-200';
+}
+
+function ListaSkusDuplicados({ grupos, titulo, explicacao }: { grupos: GrupoSkuDuplicado[]; titulo: string; explicacao: string }) {
+  if (!grupos.length) return null;
+  return <details className="rounded-xl border border-amber-200 bg-white open:pb-3">
+    <summary className="cursor-pointer list-none px-4 py-3 text-sm font-black text-amber-950 marker:hidden">
+      <span className="flex items-center justify-between gap-3"><span>{titulo}</span><span className="rounded-full bg-amber-100 px-2.5 py-1 text-[10px] uppercase text-amber-800">{numero.format(grupos.length)} SKU(s)</span></span>
+      <span className="mt-1 block text-xs font-normal leading-5 text-amber-800">{explicacao}</span>
+    </summary>
+    <div className="mx-3 max-h-96 space-y-3 overflow-y-auto border-t border-amber-100 pt-3">
+      {grupos.map(grupo => <div key={grupo.codigo} className="overflow-hidden rounded-xl border border-slate-200">
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 px-4 py-3">
+          <div><span className="text-[10px] font-black uppercase tracking-wider text-slate-500">SKU</span><strong className="ml-2 font-mono text-sm text-slate-950">{grupo.codigo}</strong></div>
+          <div className="flex flex-wrap gap-1.5">{grupo.conflitoNome && <span className="rounded-full bg-rose-100 px-2 py-1 text-[9px] font-black uppercase text-rose-800">Nomes diferentes</span>}{grupo.conflitoCategoria && <span className="rounded-full bg-rose-100 px-2 py-1 text-[9px] font-black uppercase text-rose-800">Categorias diferentes</span>}{!grupo.conflitoNome && !grupo.conflitoCategoria && <span className="rounded-full bg-amber-100 px-2 py-1 text-[9px] font-black uppercase text-amber-800">Mesmo nome e categoria</span>}</div>
+        </div>
+        <div className="divide-y divide-slate-100">{grupo.itens.map(item => <div key={item.id} className="grid gap-2 px-4 py-3 text-xs md:grid-cols-[1.5fr_1fr_auto] md:items-center"><div><span className="block text-[9px] font-black uppercase tracking-wider text-slate-400">Nome do produto</span><strong className="mt-1 block text-slate-900">{item.produto}</strong></div><div><span className="block text-[9px] font-black uppercase tracking-wider text-slate-400">Categoria</span><span className="mt-1 block font-bold text-blue-700">{item.categoria || 'Sem categoria'}</span></div><div><span className="block text-[9px] font-black uppercase tracking-wider text-slate-400">ID interno do Bling</span><code className="mt-1 block font-bold text-slate-700">{item.id_produto_bling}</code></div></div>)}</div>
+      </div>)}
+    </div>
+  </details>;
 }
 
 export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Props) {
@@ -246,9 +273,19 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
     }
     return [...grupos.entries()]
       .filter(([, grupo]) => new Set(grupo.map(item => item.id_produto_bling)).size > 1)
-      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0], 'pt-BR'));
+      .map(([codigo, grupo]) => {
+        const nomesDistintos = new Set(grupo.map(item => item.produto.trim().toLocaleUpperCase('pt-BR'))).size;
+        const categoriasDistintas = new Set(grupo.map(item => (item.categoria || 'Sem categoria').trim().toLocaleUpperCase('pt-BR'))).size;
+        return { codigo, itens: grupo, nomesDistintos, categoriasDistintas, conflitoNome: nomesDistintos > 1, conflitoCategoria: categoriasDistintas > 1 };
+      })
+      .sort((a, b) => Number(b.conflitoCategoria) - Number(a.conflitoCategoria) || Number(b.conflitoNome) - Number(a.conflitoNome) || b.itens.length - a.itens.length || a.codigo.localeCompare(b.codigo, 'pt-BR'));
   }, [itens]);
-  const codigosDuplicados = useMemo(() => new Set(skusDuplicados.map(([codigo]) => codigo)), [skusDuplicados]);
+  const gruposDuplicadosPorCodigo = useMemo(() => new Map(skusDuplicados.map(grupo => [grupo.codigo, grupo])), [skusDuplicados]);
+  const conflitosSku = skusDuplicados.filter(grupo => grupo.conflitoNome || grupo.conflitoCategoria);
+  const repeticoesSimples = skusDuplicados.filter(grupo => !grupo.conflitoNome && !grupo.conflitoCategoria);
+  const totalCadastrosRepetidos = skusDuplicados.reduce((total, grupo) => total + grupo.itens.length, 0);
+  const conflitosDeNome = skusDuplicados.filter(grupo => grupo.conflitoNome).length;
+  const conflitosDeCategoria = skusDuplicados.filter(grupo => grupo.conflitoCategoria).length;
   const testeUnitarioConfirmado = itens.some(item => item.status === 'CONCLUIDO' && item.motivo?.startsWith(MARCADOR_TESTE_UNITARIO));
   const candidatoTeste = itens.find(item => item.status === 'REVISAO') || itens.find(item => item.status === 'PENDENTE');
   const visiveis = itens.filter(item => item.status !== 'CORRETO').slice(0, 100);
@@ -280,7 +317,21 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
 
         {bloqueios.length > 0 && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5"><p className="text-sm font-black text-rose-800">Categorias que precisam ser vinculadas uma única vez no Bling</p><p className="mt-1 text-xs leading-5 text-rose-700">Esses produtos não serão alterados até que a API confirme o vínculo da categoria interna com a categoria da loja.</p><div className="mt-3 flex flex-wrap gap-2">{bloqueios.map(([categoria, total]) => <span key={categoria} className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-rose-700 ring-1 ring-rose-200">{categoria} · {total}</span>)}</div></div>}
 
-        {skusDuplicados.length > 0 && <div role="alert" className="rounded-2xl border border-amber-300 bg-amber-50 p-5"><p className="text-sm font-black text-amber-950">{numero.format(skusDuplicados.length)} SKU(s) aparecem em mais de um cadastro do Bling</p><p className="mt-1 text-xs leading-5 text-amber-800">São produtos com o mesmo código, mas IDs internos diferentes. O sistema não junta nem exclui esses cadastros automaticamente; confira se a repetição é intencional.</p><div className="mt-3 flex max-h-40 flex-wrap gap-2 overflow-y-auto">{skusDuplicados.map(([codigo, grupo]) => <span key={codigo} className="rounded-xl bg-white px-3 py-2 text-xs font-bold text-amber-900 ring-1 ring-amber-200"><strong>{codigo}</strong> · {grupo.length} cadastros<span className="mt-1 block font-mono text-[10px] text-amber-700">IDs {grupo.map(item => item.id_produto_bling).join(', ')}</span></span>)}</div></div>}
+        {skusDuplicados.length > 0 && <section aria-labelledby="titulo-skus-repetidos" className="rounded-2xl border border-amber-300 bg-amber-50 p-5">
+          <p className="text-[10px] font-black uppercase tracking-[.16em] text-amber-700">Conferência de cadastros — não são categorias</p>
+          <h4 id="titulo-skus-repetidos" className="mt-1 text-lg font-black text-amber-950">O Bling devolveu produtos diferentes usando o mesmo SKU</h4>
+          <p className="mt-2 max-w-4xl text-xs leading-5 text-amber-800">Cada SKU abaixo representa um código de produto. Dentro dele aparecem os cadastros separados que o Bling devolveu, cada um com seu próprio nome, categoria e ID interno. O sistema apenas sinaliza: não junta, não exclui e não escolhe um deles automaticamente.</p>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-xl bg-white p-3 ring-1 ring-amber-200"><span className="text-[9px] font-black uppercase text-slate-500">SKUs repetidos</span><strong className="mt-1 block text-2xl text-slate-950">{numero.format(skusDuplicados.length)}</strong></div>
+            <div className="rounded-xl bg-white p-3 ring-1 ring-amber-200"><span className="text-[9px] font-black uppercase text-slate-500">Cadastros envolvidos</span><strong className="mt-1 block text-2xl text-slate-950">{numero.format(totalCadastrosRepetidos)}</strong></div>
+            <div className="rounded-xl bg-white p-3 ring-1 ring-rose-200"><span className="text-[9px] font-black uppercase text-rose-600">Com nomes diferentes</span><strong className="mt-1 block text-2xl text-rose-800">{numero.format(conflitosDeNome)}</strong></div>
+            <div className="rounded-xl bg-white p-3 ring-1 ring-rose-200"><span className="text-[9px] font-black uppercase text-rose-600">Em categorias diferentes</span><strong className="mt-1 block text-2xl text-rose-800">{numero.format(conflitosDeCategoria)}</strong></div>
+          </div>
+          <div className="mt-4 space-y-2">
+            <ListaSkusDuplicados grupos={conflitosSku} titulo="1. Conflitos que precisam de conferência" explicacao="Mesmo SKU com nomes ou categorias diferentes. Estes são os casos mais importantes para revisar." />
+            <ListaSkusDuplicados grupos={repeticoesSimples} titulo="2. Possíveis cadastros repetidos" explicacao="Mesmo SKU, mesmo nome e mesma categoria, porém com IDs internos diferentes no Bling." />
+          </div>
+        </section>}
 
         {execucao.falhas > 0 && <div role="alert" className="rounded-2xl border border-rose-300 bg-rose-50 p-5"><p className="text-sm font-black text-rose-900">Segmento bloqueado por {numero.format(execucao.falhas)} item(ns) em revisão</p><p className="mt-1 text-xs leading-5 text-rose-700">O diagnóstico compara os IDs sem gravar nada. A conferência também consulta o Bling novamente, mas pode atualizar somente o estado local quando encontrar um vínculo já correto.</p><div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={diagnosticarCategorias} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="rounded-xl border border-rose-300 bg-white px-5 py-3 text-sm font-black text-rose-800 disabled:opacity-40">{ocupado ? 'Consultando…' : 'Diagnosticar IDs de categoria'}</button><button type="button" onClick={reconciliar} disabled={ocupado || executando || confirmacao !== execucao.segmento} className="rounded-xl bg-rose-700 px-5 py-3 text-sm font-black text-white disabled:opacity-40">{ocupado ? 'Conferindo…' : `Conferir ${numero.format(execucao.falhas)} itens em revisão`}</button></div></div>}
 
@@ -301,7 +352,7 @@ export function StorePublication({ categorias, canais, aoErro, aoMensagem }: Pro
 
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-200 px-5 py-4"><p className="text-sm font-black">Itens que exigem ação ou conferência</p><p className="mt-1 text-xs text-slate-500">Mostrando até 100 registros; os já corretos ficam ocultos desta tabela.</p></div>
-          <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">Produto</th><th className="px-4 py-3">Categoria</th><th className="px-4 py-3">Ação</th><th className="px-5 py-3">Situação</th></tr></thead><tbody>{visiveis.map(item => { const duplicado = codigosDuplicados.has(item.codigo.trim().toLocaleUpperCase('pt-BR')); return <tr key={item.id} className="border-t border-slate-100"><td className="px-5 py-3"><span className="font-mono text-xs font-black text-cyan-700">{item.codigo}</span>{duplicado && <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-black uppercase text-amber-800 ring-1 ring-amber-200">SKU repetido</span>}<span className="mt-1 block font-bold">{item.produto}</span><span className="mt-1 block font-mono text-[10px] text-slate-500">ID Bling {item.id_produto_bling}</span>{item.motivo && <span className="mt-1 block text-xs text-rose-600">{item.motivo}</span>}</td><td className="px-4 py-3 text-slate-600">{item.categoria || 'Sem categoria'}</td><td className="px-4 py-3 font-bold">{item.acao}</td><td className="px-5 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${selo(item.status)}`}>{item.status}</span></td></tr>; })}</tbody></table></div>
+          <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-left text-sm"><thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">Identificação do produto</th><th className="px-4 py-3">Categoria atual</th><th className="px-4 py-3">Ação planejada</th><th className="px-5 py-3">Situação</th></tr></thead><tbody>{visiveis.map(item => { const grupo = gruposDuplicadosPorCodigo.get(item.codigo.trim().toLocaleUpperCase('pt-BR')); const alerta = grupo?.conflitoCategoria ? 'Categorias diferentes' : grupo?.conflitoNome ? 'Nomes diferentes' : grupo ? 'Mesmo SKU' : ''; return <tr key={item.id} className="border-t border-slate-100"><td className="px-5 py-3"><span className="text-[9px] font-black uppercase tracking-wider text-slate-400">SKU</span><strong className="ml-2 font-mono text-xs text-cyan-700">{item.codigo}</strong>{alerta && <span className={`ml-2 rounded-full px-2 py-0.5 text-[9px] font-black uppercase ring-1 ${grupo?.conflitoNome || grupo?.conflitoCategoria ? 'bg-rose-50 text-rose-700 ring-rose-200' : 'bg-amber-50 text-amber-800 ring-amber-200'}`}>{alerta}</span>}<span className="mt-2 block text-[9px] font-black uppercase tracking-wider text-slate-400">Nome do produto</span><span className="mt-0.5 block font-bold">{item.produto}</span><span className="mt-2 block text-[9px] font-black uppercase tracking-wider text-slate-400">ID interno do Bling</span><code className="mt-0.5 block text-[10px] text-slate-600">{item.id_produto_bling}</code>{item.motivo && <span className="mt-2 block text-xs text-rose-600">{item.motivo}</span>}</td><td className="px-4 py-3"><span className="rounded-lg bg-blue-50 px-2.5 py-1.5 text-xs font-bold text-blue-800 ring-1 ring-blue-100">{item.categoria || 'Sem categoria'}</span></td><td className="px-4 py-3 font-bold">{item.acao}</td><td className="px-5 py-3"><span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ring-1 ${selo(item.status)}`}>{item.status}</span></td></tr>; })}</tbody></table></div>
         </div>
       </>}
 
