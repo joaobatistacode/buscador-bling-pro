@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   CAMPOS_IMAGEM,
   produtoComErro,
@@ -23,6 +23,74 @@ interface ProductReviewProps {
   buscandoImagens: boolean;
   buscandoDescricoes: boolean;
 }
+
+interface ImagemTesteMarketplace {
+  indice: number;
+  urlOriginal: string;
+  urlPrevia: string;
+  blob: Blob;
+  larguraOriginal: number;
+  alturaOriginal: number;
+}
+
+const LADO_MARKETPLACE = 1200;
+
+const carregarImagem = (blob: Blob) => new Promise<HTMLImageElement>((resolve, reject) => {
+  const url = URL.createObjectURL(blob);
+  const imagem = new Image();
+  imagem.onload = () => {
+    URL.revokeObjectURL(url);
+    resolve(imagem);
+  };
+  imagem.onerror = () => {
+    URL.revokeObjectURL(url);
+    reject(new Error('O navegador não conseguiu abrir a imagem.'));
+  };
+  imagem.src = url;
+});
+
+async function gerarCopiaMarketplace(url: string) {
+  const resposta = await fetch(`/api/imagem?url=${encodeURIComponent(url)}`);
+  if (!resposta.ok) {
+    const detalhe = await resposta.text().catch(() => '');
+    throw new Error(`Imagem recusada (HTTP ${resposta.status})${detalhe ? `: ${detalhe.slice(0, 100)}` : ''}`);
+  }
+
+  const imagem = await carregarImagem(await resposta.blob());
+  const canvas = document.createElement('canvas');
+  canvas.width = LADO_MARKETPLACE;
+  canvas.height = LADO_MARKETPLACE;
+  const contexto = canvas.getContext('2d');
+  if (!contexto) throw new Error('O navegador não conseguiu preparar a imagem.');
+
+  contexto.fillStyle = '#ffffff';
+  contexto.fillRect(0, 0, LADO_MARKETPLACE, LADO_MARKETPLACE);
+  contexto.imageSmoothingEnabled = true;
+  contexto.imageSmoothingQuality = 'high';
+
+  const escala = Math.min(LADO_MARKETPLACE / imagem.naturalWidth, LADO_MARKETPLACE / imagem.naturalHeight);
+  const largura = imagem.naturalWidth * escala;
+  const altura = imagem.naturalHeight * escala;
+  contexto.drawImage(
+    imagem,
+    (LADO_MARKETPLACE - largura) / 2,
+    (LADO_MARKETPLACE - altura) / 2,
+    largura,
+    altura
+  );
+
+  const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+  if (!blob) throw new Error('O navegador não conseguiu criar o JPEG de teste.');
+  return {
+    blob,
+    larguraOriginal: imagem.naturalWidth,
+    alturaOriginal: imagem.naturalHeight,
+  };
+}
+
+const tamanhoArquivo = (bytes: number) => bytes >= 1024 * 1024
+  ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 
 const semInformacao = (valor: unknown) => {
   const texto = String(valor ?? '').trim().toUpperCase();
@@ -51,6 +119,10 @@ export function ProductReview({
   const [marcados, setMarcados] = useState<number[]>([]);
   const [confirmandoRemocao, setConfirmandoRemocao] = useState(false);
   const [sugestoesSelecionadas, setSugestoesSelecionadas] = useState<Record<number, string[]>>({});
+  const [gerandoTesteMarketplace, setGerandoTesteMarketplace] = useState(false);
+  const [erroTesteMarketplace, setErroTesteMarketplace] = useState('');
+  const [imagensTesteMarketplace, setImagensTesteMarketplace] = useState<ImagemTesteMarketplace[]>([]);
+  const [indiceProdutoTesteMarketplace, setIndiceProdutoTesteMarketplace] = useState<number | null>(null);
 
   const filtrados = useMemo(() => {
     const termo = busca.trim().toLocaleLowerCase('pt-BR');
@@ -65,6 +137,14 @@ export function ProductReview({
     ? indiceDentroDaLista
     : filtrados[0]?.indice ?? indiceDentroDaLista;
   const produto = produtos[indiceSelecionado];
+  const urlsProduto = produto
+    ? CAMPOS_IMAGEM.map(campo => String(produto[campo] || '').trim()).filter(Boolean)
+    : [];
+
+  useEffect(() => {
+    return () => imagensTesteMarketplace.forEach(imagem => URL.revokeObjectURL(imagem.urlPrevia));
+  }, [imagensTesteMarketplace]);
+
   if (!produto) return null;
   const todosFiltradosMarcados = filtrados.length > 0 &&
     filtrados.every(item => marcados.includes(item.indice));
@@ -74,6 +154,47 @@ export function ProductReview({
   const produtoTemErro = produtoComErro(produto);
   const produtoEstaSemFotos = produtoSemFotos(produto);
   const selecionadas = sugestoesSelecionadas[indiceSelecionado] ?? [];
+
+  const prepararTesteMarketplace = async () => {
+    if (gerandoTesteMarketplace || urlsProduto.length === 0) return;
+    setGerandoTesteMarketplace(true);
+    setErroTesteMarketplace('');
+    setImagensTesteMarketplace([]);
+    setIndiceProdutoTesteMarketplace(indiceSelecionado);
+
+    const geradas: ImagemTesteMarketplace[] = [];
+    try {
+      for (let indice = 0; indice < urlsProduto.length; indice++) {
+        const urlOriginal = urlsProduto[indice];
+        const resultado = await gerarCopiaMarketplace(urlOriginal);
+        geradas.push({
+          indice,
+          urlOriginal,
+          urlPrevia: URL.createObjectURL(resultado.blob),
+          blob: resultado.blob,
+          larguraOriginal: resultado.larguraOriginal,
+          alturaOriginal: resultado.alturaOriginal,
+        });
+      }
+      setImagensTesteMarketplace(geradas);
+    } catch (erro) {
+      geradas.forEach(imagem => URL.revokeObjectURL(imagem.urlPrevia));
+      setErroTesteMarketplace(erro instanceof Error ? erro.message : 'Falha ao preparar o teste.');
+    } finally {
+      setGerandoTesteMarketplace(false);
+    }
+  };
+
+  const baixarImagemTeste = (imagem: ImagemTesteMarketplace) => {
+    const url = URL.createObjectURL(imagem.blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${produto.codigo.replace(/[^a-zA-Z0-9._-]/g, '-') || 'produto'}_marketplace_${imagem.indice + 1}_1200x1200.jpg`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  };
 
   const alternarMarcado = (indice: number) => {
     setMarcados(atuais => atuais.includes(indice)
@@ -323,6 +444,69 @@ export function ProductReview({
                 </div>
               );
             })}
+          </div>
+
+          <div className="mt-5 rounded-xl border border-violet-200 bg-violet-50 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-black uppercase tracking-wider text-violet-700">Teste seguro de compatibilidade</p>
+                <h4 className="mt-1 text-sm font-bold text-violet-950">Cópias 1200×1200 para marketplaces</h4>
+                <p className="mt-1 max-w-3xl text-xs leading-5 text-violet-900">
+                  Gera cópias locais das fotos deste produto sem substituir URLs, enviar ao Supabase ou alterar o Bling.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={prepararTesteMarketplace}
+                disabled={ocupado || gerandoTesteMarketplace || urlsProduto.length === 0}
+                className="rounded-lg bg-violet-700 px-4 py-2.5 text-xs font-black text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {gerandoTesteMarketplace ? 'Preparando cópias…' : `Preparar teste (${urlsProduto.length})`}
+              </button>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-1.5" aria-label="Destinos do teste">
+              {['Casas Bahia', 'Mercado Livre', 'Amazon', 'Shopee', 'Bling Loja Virtual'].map(destino => (
+                <span key={destino} className="rounded-full border border-violet-200 bg-white px-2.5 py-1 text-[10px] font-bold text-violet-800">{destino}</span>
+              ))}
+            </div>
+            {indiceProdutoTesteMarketplace === indiceSelecionado && erroTesteMarketplace && <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-700">{erroTesteMarketplace}</p>}
+            {indiceProdutoTesteMarketplace === indiceSelecionado && imagensTesteMarketplace.length > 0 && (
+              <div className="mt-4">
+                <p className="mb-3 text-xs font-bold text-emerald-800">
+                  {imagensTesteMarketplace.length} cópia(s) pronta(s). Confira a nitidez e baixe somente para o teste controlado.
+                </p>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {imagensTesteMarketplace.map(imagem => {
+                    const ampliada = imagem.larguraOriginal < 1000 || imagem.alturaOriginal < 1000;
+                    return (
+                      <div key={`${imagem.urlOriginal}-${imagem.indice}`} className="overflow-hidden rounded-xl border border-violet-200 bg-white">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={imagem.urlPrevia} alt={`Cópia 1200×1200 da imagem ${imagem.indice + 1}`} className="aspect-square w-full object-contain" />
+                        <div className="border-t border-slate-100 p-3">
+                          <p className="text-xs font-black text-slate-900">Imagem {imagem.indice + 1}</p>
+                          <p className="mt-1 text-[10px] leading-4 text-slate-600">
+                            Origem: {imagem.larguraOriginal}×{imagem.alturaOriginal}<br />
+                            Cópia: 1200×1200 • {tamanhoArquivo(imagem.blob.size)}
+                          </p>
+                          <span className={`mt-2 inline-flex rounded-full px-2 py-1 text-[9px] font-black ${
+                            ampliada ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-800'
+                          }`}>
+                            {ampliada ? 'AMPLIADA — CONFERIR NITIDEZ' : 'ORIGEM EM ALTA RESOLUÇÃO'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => baixarImagemTeste(imagem)}
+                            className="mt-3 w-full rounded-lg border border-violet-300 px-3 py-2 text-xs font-bold text-violet-800 hover:bg-violet-50"
+                          >
+                            Baixar JPEG de teste
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           {produto.imagensSugeridas && (
