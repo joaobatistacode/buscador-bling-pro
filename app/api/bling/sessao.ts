@@ -15,6 +15,33 @@ export interface SessaoBling {
   expira_em: number;
 }
 
+type ErroOAuth = Error & { statusOAuth?: number };
+
+function objeto(valor: unknown): Record<string, unknown> {
+  return valor && typeof valor === 'object' ? valor as Record<string, unknown> : {};
+}
+
+function textoDoErro(valor: unknown) {
+  if (typeof valor === 'string') return valor.trim();
+  if (typeof valor === 'number' || typeof valor === 'boolean') return String(valor);
+  return '';
+}
+
+function motivoOAuth(valor: unknown, status: number) {
+  const dados = objeto(valor);
+  const erro = objeto(dados.error);
+  const partes = [
+    textoDoErro(dados.error_description),
+    textoDoErro(erro.description),
+    textoDoErro(erro.message),
+    textoDoErro(erro.type),
+    textoDoErro(dados.description),
+    textoDoErro(dados.message),
+    textoDoErro(dados.error),
+  ].filter((item, indice, todos) => item && todos.indexOf(item) === indice);
+  return (partes.join(' — ') || `HTTP ${status}`).slice(0, 600);
+}
+
 export function credenciais() {
   const id = process.env.BLING_CLIENT_ID;
   const segredo = process.env.BLING_CLIENT_SECRET;
@@ -75,8 +102,10 @@ export async function pedirToken(campos: Record<string, string>): Promise<Sessao
   const dados = await res.json().catch(() => ({}));
 
   if (!res.ok || !dados.access_token) {
-    const motivo = dados.error_description || dados.error || `HTTP ${res.status}`;
-    throw new Error(`O Bling recusou a autenticação: ${motivo}`);
+    const motivo = motivoOAuth(dados, res.status);
+    const falha = new Error(`O Bling recusou a autenticação: ${motivo}`) as ErroOAuth;
+    falha.statusOAuth = res.ok ? 502 : res.status;
+    throw falha;
   }
 
   return {
@@ -98,11 +127,21 @@ export async function tokenValido(): Promise<string | null> {
 
   if (!sessao.refresh_token) return null;
 
-  const renovada = await pedirToken({
-    grant_type: 'refresh_token',
-    refresh_token: sessao.refresh_token,
-  });
+  try {
+    const renovada = await pedirToken({
+      grant_type: 'refresh_token',
+      refresh_token: sessao.refresh_token,
+    });
 
-  await guardarSessao(renovada);
-  return renovada.access_token;
+    await guardarSessao(renovada);
+    return renovada.access_token;
+  } catch (erro) {
+    const status = Number((erro as ErroOAuth)?.statusOAuth);
+    if ([400, 401, 403].includes(status)) {
+      await apagarSessao();
+      const mensagem = erro instanceof Error ? erro.message : 'O Bling recusou a renovação do token.';
+      throw new Error(`${mensagem} A sessão inválida foi encerrada; conecte novamente ao Bling em Configurações.`);
+    }
+    throw erro;
+  }
 }
