@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 export type CategoriaCatalogo = { id: number; descricao: string; categoriaPai?: { id?: number } };
 export type ProdutoCatalogo = {
@@ -52,9 +52,16 @@ type Props = {
   aoErro: (mensagem: string) => void;
 };
 
+type FalhaResposta = Error & { status?: number; codigo?: string };
+
 async function jsonDaResposta(resposta: Response) {
   const dados = await resposta.json().catch(() => ({}));
-  if (!resposta.ok || dados.erro) throw new Error(dados.erro || `HTTP ${resposta.status}`);
+  if (!resposta.ok || dados.erro) {
+    const falha = new Error(dados.erro || `HTTP ${resposta.status}`) as FalhaResposta;
+    falha.status = resposta.status;
+    falha.codigo = String(dados.codigo || '');
+    throw falha;
+  }
   return dados;
 }
 
@@ -174,6 +181,8 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
   const [simulacaoImagens, setSimulacaoImagens] = useState<SimulacaoImagens>();
   const [confirmacaoSku, setConfirmacaoSku] = useState('');
   const [mensagemTeste, setMensagemTeste] = useState('');
+  const controladorConsulta = useRef<AbortController | undefined>(undefined);
+  const sequenciaConsulta = useRef(0);
 
   const segmentoAtualId = segmentoId;
   const categoriasDoSegmento = useMemo(() => segmentoAtualId ? filhosDe(segmentoAtualId, categorias) : [], [categorias, segmentoAtualId]);
@@ -188,6 +197,10 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
 
   const consultar = async () => {
     if (!idsConsulta.length) return;
+    controladorConsulta.current?.abort();
+    const controlador = new AbortController();
+    controladorConsulta.current = controlador;
+    const sequencia = ++sequenciaConsulta.current;
     setCarregando(true);
     setProdutos([]);
     setPagina(1);
@@ -196,20 +209,28 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
     try {
       const parametros = new URLSearchParams({ recurso: 'produtos', categorias: idsConsulta.join(',') });
       if (busca.trim()) parametros.set('q', busca.trim());
-      const dados = await jsonDaResposta(await fetch(`/api/bling/administracao?${parametros}`));
+      const dados = await jsonDaResposta(await fetch(`/api/bling/administracao?${parametros}`, { signal: controlador.signal }));
+      if (controlador.signal.aborted || sequencia !== sequenciaConsulta.current) return;
       setProdutos(dados.produtos || []);
       setTruncado(Boolean(dados.truncado));
     } catch (erro) {
+      if (controlador.signal.aborted || (erro instanceof DOMException && erro.name === 'AbortError')) return;
       aoErro(erro instanceof Error ? erro.message : 'Não foi possível consultar os produtos.');
     } finally {
-      setCarregando(false);
+      if (sequencia === sequenciaConsulta.current) {
+        setCarregando(false);
+        if (controladorConsulta.current === controlador) controladorConsulta.current = undefined;
+      }
     }
   };
 
   useEffect(() => {
     if (!idsConsulta.length) return;
     const atraso = window.setTimeout(() => { void consultar(); }, 80);
-    return () => window.clearTimeout(atraso);
+    return () => {
+      window.clearTimeout(atraso);
+      controladorConsulta.current?.abort();
+    };
     // A busca textual só é aplicada ao confirmar; a navegação hierárquica é automática.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idsConsulta.join(',')]);
@@ -317,6 +338,13 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
 
   const aplicarTrocaDeImagens = async () => {
     if (!produtoTeste || !simulacaoImagens) return;
+    if (simulacaoImagens.expiraEm <= Date.now()) {
+      setSimulacaoImagens(undefined);
+      setConfirmacaoSku('');
+      setMensagemTeste('A simulação venceu e foi descartada com segurança. Prepare uma nova simulação antes de aplicar.');
+      aoErro('A simulação expirou. Nenhuma alteração foi feita no Bling.');
+      return;
+    }
     setAplicandoImagens(true);
     setMensagemTeste('Aplicando somente as imagens e conferindo novamente no Bling…');
     aoErro('');
@@ -330,7 +358,14 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
       setConfirmacaoSku('');
       setMensagemTeste(`Teste concluído: o Bling confirmou ${retorno.quantidadeConfirmada} imagem(ns). Confira este produto nos canais antes de testar outro.`);
     } catch (erro) {
-      setMensagemTeste('');
+      const codigo = String((erro as FalhaResposta)?.codigo || '');
+      if (codigo.startsWith('SIMULACAO_')) {
+        setSimulacaoImagens(undefined);
+        setConfirmacaoSku('');
+        setMensagemTeste('A simulação foi descartada com segurança. Prepare uma nova simulação para reler o produto no Bling.');
+      } else {
+        setMensagemTeste('');
+      }
       aoErro(erro instanceof Error ? erro.message : 'A conferência da troca falhou. Não teste outro produto até revisar este cadastro.');
     } finally {
       setAplicandoImagens(false);
