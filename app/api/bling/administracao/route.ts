@@ -12,6 +12,16 @@ import { supabaseRest } from '@/lib/supabase-admin';
 type Objeto = Record<string, unknown>;
 type FalhaApi = Error & { status?: number; codigo?: string };
 
+const CAMPOS_PUT_PRODUTO = [
+  'nome', 'codigo', 'preco', 'tipo', 'situacao', 'formato', 'descricaoCurta',
+  'dataValidade', 'unidade', 'pesoLiquido', 'pesoBruto', 'volumes',
+  'itensPorCaixa', 'gtin', 'gtinEmbalagem', 'tipoProducao', 'condicao',
+  'freteGratis', 'marca', 'descricaoComplementar', 'linkExterno', 'observacoes',
+  'descricaoEmbalagemDiscreta', 'categoria', 'estoque', 'fornecedor',
+  'dimensoes', 'tributacao', 'linhaProduto', 'camposCustomizados',
+  'artigoPerigoso', 'duns',
+] as const;
+
 const pausa = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const INTERVALO_LEITURA_BLING_MS = 500;
 let filaLeiturasBling = Promise.resolve();
@@ -265,13 +275,18 @@ function linksDasImagens(produto: Objeto) {
   const midia = produto.midia && typeof produto.midia === 'object' ? produto.midia as Objeto : {};
   const imagens = midia.imagens && typeof midia.imagens === 'object' ? midia.imagens as Objeto : {};
   const grupos = [imagens.internas, imagens.externas, imagens.imagensURL];
-  const grupo = grupos.find(item => Array.isArray(item) && item.length > 0);
   const links: string[] = [];
-  if (Array.isArray(grupo)) {
+  const chaves = new Set<string>();
+  for (const grupo of grupos) {
+    if (!Array.isArray(grupo)) continue;
     for (const item of grupo) {
       const registro = item && typeof item === 'object' ? item as Objeto : {};
       const link = String(registro.link || registro.url || registro.linkOriginal || registro.urlOriginal || registro.imagemURL || registro.urlImagem || registro.linkMiniatura || '').trim();
-      if (/^https:\/\//i.test(link) && !links.includes(link)) links.push(link);
+      const chave = linkEstavelDaImagem(link);
+      if (/^https:\/\//i.test(link) && !chaves.has(chave)) {
+        chaves.add(chave);
+        links.push(link);
+      }
     }
   }
   const imagemPrincipal = String(produto.imagemURL || '').trim();
@@ -327,6 +342,70 @@ function retratoParaSimulacaoDeImagens(produto: Objeto) {
     produto: retratoSemMidia(produto),
     imagens: linksDasImagens(produto).map(linkEstavelDaImagem),
   };
+}
+
+function corpoPutParaImagens(produto: Objeto, linksNovos: string[]) {
+  if (String(produto.formato || '').toUpperCase() !== 'S') {
+    throw new Error('A substituição automática de imagens está liberada somente para produto simples, sem variações ou composição.');
+  }
+  const possuiEstrutura = produto.estrutura && typeof produto.estrutura === 'object'
+    ? Object.keys(produto.estrutura as Objeto).length > 0
+    : Boolean(produto.estrutura);
+  if ((Array.isArray(produto.variacoes) && produto.variacoes.length > 0) || possuiEstrutura) {
+    throw new Error('Produto com variações ou estrutura detectado. Nenhuma imagem foi alterada.');
+  }
+  const corpo: Objeto = {};
+  for (const campo of CAMPOS_PUT_PRODUTO) {
+    if (produto[campo] !== undefined && produto[campo] !== null) corpo[campo] = produto[campo];
+  }
+
+  const categoria = produto.categoria && typeof produto.categoria === 'object' ? produto.categoria as Objeto : {};
+  if (Number.isSafeInteger(Number(categoria.id)) && Number(categoria.id) > 0) corpo.categoria = { id: Number(categoria.id) };
+  const linhaProduto = produto.linhaProduto && typeof produto.linhaProduto === 'object' ? produto.linhaProduto as Objeto : {};
+  if (Number.isSafeInteger(Number(linhaProduto.id)) && Number(linhaProduto.id) > 0) corpo.linhaProduto = { id: Number(linhaProduto.id) };
+
+  const midiaAtual = produto.midia && typeof produto.midia === 'object' ? produto.midia as Objeto : {};
+  const midia: Objeto = { imagens: { imagensURL: linksNovos.map(link => ({ link })) } };
+  if (midiaAtual.video && typeof midiaAtual.video === 'object') midia.video = midiaAtual.video;
+  corpo.midia = midia;
+  return corpo;
+}
+
+async function conferirSubstituicaoDeImagens(
+  idProduto: number,
+  token: string,
+  antes: Objeto,
+  quantidadeEsperada: number,
+) {
+  const linksAntes = linksDasImagens(antes);
+  const assinaturaAntes = hash(linksAntes.map(linkEstavelDaImagem));
+  let assinaturaAnterior = '';
+  let leiturasEstaveis = 0;
+  let depois: Objeto | undefined;
+  let linksConfirmados: string[] = [];
+
+  for (let tentativa = 0; tentativa < 8; tentativa++) {
+    await pausa(tentativa === 0 ? 1_200 : 1_500);
+    depois = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
+    if (!depois) continue;
+    if (hash(retratoSemMidia(antes)) !== hash(retratoSemMidia(depois))) {
+      throw new Error('ALERTA: a conferência detectou mudança fora das imagens. Interrompa novas operações e revise o produto no Bling.');
+    }
+
+    linksConfirmados = linksDasImagens(depois);
+    const assinaturaAtual = hash(linksConfirmados.map(linkEstavelDaImagem));
+    const conjuntoFoiSubstituido = linksConfirmados.length !== linksAntes.length || assinaturaAtual !== assinaturaAntes;
+    if (linksConfirmados.length === quantidadeEsperada && conjuntoFoiSubstituido && assinaturaAtual === assinaturaAnterior) {
+      leiturasEstaveis += 1;
+      if (leiturasEstaveis >= 1) return { depois, linksConfirmados };
+    } else {
+      leiturasEstaveis = 0;
+    }
+    assinaturaAnterior = assinaturaAtual;
+  }
+
+  if (!depois) throw new Error('O Bling não devolveu o produto após a alteração.');
+  throw new Error(`O Bling respondeu, mas estabilizou com ${linksConfirmados.length} de ${quantidadeEsperada} imagens. A operação foi marcada para revisão.`);
 }
 
 function respostaErro(erro: unknown) {
@@ -495,16 +574,24 @@ export async function POST(request: Request) {
       if (!atual) throw new Error('O Bling não devolveu o produto.');
       const linksAtuais = linksDasImagens(atual);
       if (!linksAtuais.length) throw new Error('O produto não possui imagens no Bling.');
-      const linksNovos = validarNovasImagens(pedido.urls, linksAtuais.length);
+      const reparoDuplicacao = pedido.modo === 'reparar-duplicacao';
+      const quantidadeNova = Array.isArray(pedido.urls) ? pedido.urls.length : 0;
+      if (reparoDuplicacao && linksAtuais.length !== quantidadeNova * 2) {
+        throw new Error(`O reparo exige exatamente o dobro de imagens atuais. O Bling devolveu ${linksAtuais.length} e o reparo contém ${quantidadeNova}.`);
+      }
+      const linksNovos = validarNovasImagens(pedido.urls, reparoDuplicacao ? quantidadeNova : linksAtuais.length);
       const codigo = texto(atual.codigo, 120, 'SKU do produto');
-      const corpoPatch = { midia: { imagens: { imagensURL: linksNovos.map(link => ({ link })) } } };
+      const planoImagens = { midia: { imagens: { imagensURL: linksNovos.map(link => ({ link })) } } };
       const plano = {
         versao: 1,
         tipo: 'imagens-marketplace',
+        modo: reparoDuplicacao ? 'reparar-duplicacao' : 'substituir',
         idProduto,
         codigo,
         linksAtuais,
         linksNovos,
+        quantidadeAntes: linksAtuais.length,
+        quantidadeDepois: linksNovos.length,
         hashAtual: hash(retratoParaSimulacaoDeImagens(atual)),
         expiraEm: Date.now() + 10 * 60 * 1000,
       };
@@ -514,7 +601,7 @@ export async function POST(request: Request) {
         produto: { id: idProduto, codigo, nome: atual.nome },
         antes: { imagens: linksAtuais },
         depois: { imagens: linksNovos },
-        corpoPatch,
+        corpoPatch: planoImagens,
       });
     }
 
@@ -529,36 +616,33 @@ export async function POST(request: Request) {
         throw falhaApi('O produto mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.', 'SIMULACAO_DESATUALIZADA');
       }
       const linksAtuais = linksDasImagens(antes);
-      const linksNovos = validarNovasImagens(plano.linksNovos, linksAtuais.length);
-      const corpoPatch = { midia: { imagens: { imagensURL: linksNovos.map(link => ({ link })) } } };
+      const quantidadeAntes = inteiro(plano.quantidadeAntes, 'Quantidade atual de imagens');
+      const quantidadeDepois = inteiro(plano.quantidadeDepois, 'Quantidade final de imagens');
+      if (linksAtuais.length !== quantidadeAntes) {
+        throw falhaApi('A quantidade de imagens mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.', 'SIMULACAO_DESATUALIZADA');
+      }
+      const linksNovos = validarNovasImagens(plano.linksNovos, quantidadeDepois);
+      const planoImagens = { midia: { imagens: { imagensURL: linksNovos.map(link => ({ link })) } } };
+      const corpoPut = corpoPutParaImagens(antes, linksNovos);
       const auditoria = await iniciarAuditoria({
         tipo: 'ALTERAR_IMAGENS_MARKETPLACE',
         id_produto_bling: idProduto,
         codigo,
         antes: { imagens: linksAtuais },
-        solicitado: corpoPatch,
+        solicitado: planoImagens,
       });
       let requisicaoEnviada = false;
       try {
         await pausa(500);
         requisicaoEnviada = true;
-        await chamarBling(`/produtos/${idProduto}`, token, { method: 'PATCH', body: JSON.stringify(corpoPatch) });
+        await chamarBling(`/produtos/${idProduto}`, token, { method: 'PUT', body: JSON.stringify(corpoPut) });
 
-        let depois: Objeto | undefined;
-        let linksConfirmados: string[] = [];
-        for (let tentativa = 0; tentativa < 3; tentativa++) {
-          await pausa(800);
-          depois = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
-          linksConfirmados = depois ? linksDasImagens(depois) : [];
-          if (linksConfirmados.length === linksNovos.length) break;
-        }
-        if (!depois) throw new Error('O Bling não devolveu o produto após a alteração.');
-        if (hash(retratoSemMidia(antes)) !== hash(retratoSemMidia(depois))) {
-          throw new Error('ALERTA: a conferência detectou mudança fora das imagens. Interrompa novas operações e revise o produto no Bling.');
-        }
-        if (linksConfirmados.length !== linksNovos.length) {
-          throw new Error(`O Bling respondeu, mas devolveu ${linksConfirmados.length} de ${linksNovos.length} imagens na conferência posterior.`);
-        }
+        const { depois, linksConfirmados } = await conferirSubstituicaoDeImagens(
+          idProduto,
+          token,
+          antes,
+          quantidadeDepois,
+        );
         await concluirAuditoria(auditoria, 'SUCESSO');
         return Response.json({
           aplicado: true,

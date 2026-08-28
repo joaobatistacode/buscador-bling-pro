@@ -71,13 +71,24 @@ function linksDasImagens(produto: Record<string, unknown>) {
   const midia = produto.midia && typeof produto.midia === 'object' ? produto.midia as Record<string, unknown> : {};
   const imagens = midia.imagens && typeof midia.imagens === 'object' ? midia.imagens as Record<string, unknown> : {};
   const grupos = [imagens.internas, imagens.externas, imagens.imagensURL];
-  const grupo = grupos.find(item => Array.isArray(item) && item.length > 0);
   const links: string[] = [];
-  if (Array.isArray(grupo)) {
+  const chaves = new Set<string>();
+  for (const grupo of grupos) {
+    if (!Array.isArray(grupo)) continue;
     for (const item of grupo) {
       const registro = item && typeof item === 'object' ? item as Record<string, unknown> : {};
       const link = String(registro.link || registro.url || registro.linkOriginal || registro.urlOriginal || registro.imagemURL || registro.urlImagem || registro.linkMiniatura || '').trim();
-      if (/^https:\/\//i.test(link) && !links.includes(link)) links.push(link);
+      let chave = link;
+      try {
+        const url = new URL(link);
+        url.search = '';
+        url.hash = '';
+        chave = url.toString();
+      } catch {}
+      if (/^https:\/\//i.test(link) && !chaves.has(chave)) {
+        chaves.add(chave);
+        links.push(link);
+      }
     }
   }
   const principal = String(produto.imagemURL || '').trim();
@@ -464,9 +475,9 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
 
           {simulacaoImagens && <div className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-4">
             <p className="text-xs font-black uppercase tracking-wider text-rose-700">Última barreira antes da alteração real</p>
-            <p className="mt-2 text-sm font-semibold text-rose-950">O servidor enviará somente <code className="rounded bg-white px-1 py-0.5">midia.imagens.imagensURL</code>. Digite <strong>{produtoTeste.codigo}</strong> para liberar este único produto.</p>
+            <p className="mt-2 text-sm font-semibold text-rose-950">O servidor reconstruirá o produto a partir da leitura atual e substituirá somente o conjunto de imagens. Depois, fará duas conferências estáveis no Bling. Digite <strong>{produtoTeste.codigo}</strong> para liberar este único produto.</p>
             <details className="mt-3 rounded-xl border border-rose-100 bg-white p-3 text-xs text-slate-700">
-              <summary className="cursor-pointer font-black">Ver corpo exato do PATCH</summary>
+              <summary className="cursor-pointer font-black">Ver conjunto exato de imagens novas</summary>
               <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(simulacaoImagens.corpoPatch, null, 2)}</pre>
             </details>
             <div className="mt-4 flex flex-wrap gap-2">
