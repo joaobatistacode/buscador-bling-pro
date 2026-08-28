@@ -213,6 +213,56 @@ function retratoEditavel(produto: Objeto) {
   return { categoria: produto.categoria ?? null, camposCustomizados: camposDoProduto(produto) };
 }
 
+function linksDasImagens(produto: Objeto) {
+  const midia = produto.midia && typeof produto.midia === 'object' ? produto.midia as Objeto : {};
+  const imagens = midia.imagens && typeof midia.imagens === 'object' ? midia.imagens as Objeto : {};
+  const grupos = [imagens.internas, imagens.externas, imagens.imagensURL];
+  const grupo = grupos.find(item => Array.isArray(item) && item.length > 0);
+  const links: string[] = [];
+  if (Array.isArray(grupo)) {
+    for (const item of grupo) {
+      const registro = item && typeof item === 'object' ? item as Objeto : {};
+      const link = String(registro.link || registro.url || registro.linkOriginal || registro.urlOriginal || registro.imagemURL || registro.urlImagem || registro.linkMiniatura || '').trim();
+      if (/^https:\/\//i.test(link) && !links.includes(link)) links.push(link);
+    }
+  }
+  const imagemPrincipal = String(produto.imagemURL || '').trim();
+  if (!links.length && /^https:\/\//i.test(imagemPrincipal)) links.push(imagemPrincipal);
+  return links;
+}
+
+function validarNovasImagens(valor: unknown, quantidadeEsperada: number) {
+  if (!Array.isArray(valor) || !valor.length || valor.length > 10) {
+    throw new Error('A simulação deve conter entre 1 e 10 imagens.');
+  }
+  const base = process.env.SUPABASE_URL;
+  if (!base) throw new Error('SUPABASE_URL não está configurada.');
+  const hostPermitido = new URL(base).host;
+  const urls = [...new Set(valor.map(item => String(item || '').trim()))];
+  if (urls.length !== valor.length || urls.length !== quantidadeEsperada) {
+    throw new Error(`A troca deve preservar exatamente as ${quantidadeEsperada} imagens atuais, sem repetições.`);
+  }
+  for (const item of urls) {
+    let url: URL;
+    try { url = new URL(item); } catch { throw new Error('Uma das imagens novas possui endereço inválido.'); }
+    if (url.protocol !== 'https:' || url.host !== hostPermitido) {
+      throw new Error('As imagens novas precisam ser as cópias protegidas geradas pelo próprio sistema.');
+    }
+    if (!url.pathname.startsWith('/storage/v1/object/public/produtos-bling/') || !url.pathname.includes('-marketplace/')) {
+      throw new Error('O caminho de uma imagem nova não pertence à área protegida de teste para marketplaces.');
+    }
+  }
+  return urls;
+}
+
+function retratoSemMidia(produto: Objeto) {
+  const copia = { ...produto };
+  delete copia.midia;
+  delete copia.imagemURL;
+  delete copia.dataAlteracao;
+  return copia;
+}
+
 function respostaErro(erro: unknown) {
   const statusBling = Number((erro as { status?: number })?.status);
   const status = statusBling === 429 ? 429 : statusBling === 401 || statusBling === 403 ? 401 : 400;
@@ -377,6 +427,90 @@ export async function POST(request: Request) {
     const pedido = JSON.parse(new TextDecoder().decode(bruto)) as Objeto;
     const acao = String(pedido.acao || '');
     const token = await tokenDaSessao();
+
+    if (acao === 'simular-imagens') {
+      const idProduto = inteiro(pedido.idProduto, 'Produto');
+      const atual = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
+      if (!atual) throw new Error('O Bling não devolveu o produto.');
+      const linksAtuais = linksDasImagens(atual);
+      if (!linksAtuais.length) throw new Error('O produto não possui imagens no Bling.');
+      const linksNovos = validarNovasImagens(pedido.urls, linksAtuais.length);
+      const codigo = texto(atual.codigo, 120, 'SKU do produto');
+      const corpoPatch = { midia: { imagens: { imagensURL: linksNovos.map(link => ({ link })) } } };
+      const plano = {
+        versao: 1,
+        tipo: 'imagens-marketplace',
+        idProduto,
+        codigo,
+        linksAtuais,
+        linksNovos,
+        hashAtual: hash(atual),
+        expiraEm: Date.now() + 10 * 60 * 1000,
+      };
+      return Response.json({
+        simulacao: assinar(plano),
+        expiraEm: plano.expiraEm,
+        produto: { id: idProduto, codigo, nome: atual.nome },
+        antes: { imagens: linksAtuais },
+        depois: { imagens: linksNovos },
+        corpoPatch,
+      });
+    }
+
+    if (acao === 'aplicar-imagens') {
+      const plano = conferirAssinatura(pedido.simulacao);
+      if (plano.tipo !== 'imagens-marketplace') throw new Error('Esta simulação não é de imagens para marketplace.');
+      const codigo = texto(plano.codigo, 120, 'SKU');
+      if (String(pedido.confirmacao || '').trim() !== codigo) throw new Error(`Digite exatamente o SKU ${codigo} para confirmar.`);
+      const idProduto = inteiro(plano.idProduto, 'Produto');
+      const antes = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
+      if (!antes || hash(antes) !== plano.hashAtual) {
+        throw new Error('O produto mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.');
+      }
+      const linksAtuais = linksDasImagens(antes);
+      const linksNovos = validarNovasImagens(plano.linksNovos, linksAtuais.length);
+      const corpoPatch = { midia: { imagens: { imagensURL: linksNovos.map(link => ({ link })) } } };
+      const auditoria = await iniciarAuditoria({
+        tipo: 'ALTERAR_IMAGENS_MARKETPLACE',
+        id_produto_bling: idProduto,
+        codigo,
+        antes: { imagens: linksAtuais },
+        solicitado: corpoPatch,
+      });
+      let requisicaoEnviada = false;
+      try {
+        await pausa(500);
+        requisicaoEnviada = true;
+        await chamarBling(`/produtos/${idProduto}`, token, { method: 'PATCH', body: JSON.stringify(corpoPatch) });
+
+        let depois: Objeto | undefined;
+        let linksConfirmados: string[] = [];
+        for (let tentativa = 0; tentativa < 3; tentativa++) {
+          await pausa(800);
+          depois = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
+          linksConfirmados = depois ? linksDasImagens(depois) : [];
+          if (linksConfirmados.length === linksNovos.length) break;
+        }
+        if (!depois) throw new Error('O Bling não devolveu o produto após a alteração.');
+        if (hash(retratoSemMidia(antes)) !== hash(retratoSemMidia(depois))) {
+          throw new Error('ALERTA: a conferência detectou mudança fora das imagens. Interrompa novas operações e revise o produto no Bling.');
+        }
+        if (linksConfirmados.length !== linksNovos.length) {
+          throw new Error(`O Bling respondeu, mas devolveu ${linksConfirmados.length} de ${linksNovos.length} imagens na conferência posterior.`);
+        }
+        await concluirAuditoria(auditoria, 'SUCESSO');
+        return Response.json({
+          aplicado: true,
+          produto: { id: idProduto, codigo, nome: depois.nome },
+          imagensAntes: linksAtuais,
+          imagensDepois: linksConfirmados,
+          quantidadeConfirmada: linksConfirmados.length,
+        });
+      } catch (erro) {
+        await concluirAuditoria(auditoria, requisicaoEnviada ? 'REVISAO' : 'FALHA', erro instanceof Error ? erro.message : 'Falha não identificada').catch(() => null);
+        throw erro;
+      }
+    }
 
     if (acao === 'simular-produto') {
       const idProduto = inteiro(pedido.idProduto, 'Produto');

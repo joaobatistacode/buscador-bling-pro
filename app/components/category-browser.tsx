@@ -23,6 +23,28 @@ type Diagnostico = {
   alerta: boolean;
 };
 
+type ImagemTesteMarketplace = {
+  indice: number;
+  urlOriginal: string;
+  urlPrevia: string;
+  blob: Blob;
+  larguraOriginal: number;
+  alturaOriginal: number;
+};
+
+type ProdutoTesteMarketplace = {
+  id: number;
+  codigo: string;
+  nome: string;
+  links: string[];
+};
+
+type SimulacaoImagens = {
+  simulacao: string;
+  expiraEm: number;
+  corpoPatch: { midia: { imagens: { imagensURL: Array<{ link: string }> } } };
+};
+
 type Props = {
   categorias: CategoriaCatalogo[];
   produtoAberto?: number;
@@ -35,6 +57,60 @@ async function jsonDaResposta(resposta: Response) {
   if (!resposta.ok || dados.erro) throw new Error(dados.erro || `HTTP ${resposta.status}`);
   return dados;
 }
+
+const LADO_MARKETPLACE = 1200;
+
+function linksDasImagens(produto: Record<string, unknown>) {
+  const midia = produto.midia && typeof produto.midia === 'object' ? produto.midia as Record<string, unknown> : {};
+  const imagens = midia.imagens && typeof midia.imagens === 'object' ? midia.imagens as Record<string, unknown> : {};
+  const grupos = [imagens.internas, imagens.externas, imagens.imagensURL];
+  const grupo = grupos.find(item => Array.isArray(item) && item.length > 0);
+  const links: string[] = [];
+  if (Array.isArray(grupo)) {
+    for (const item of grupo) {
+      const registro = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+      const link = String(registro.link || registro.url || registro.linkOriginal || registro.urlOriginal || registro.imagemURL || registro.urlImagem || registro.linkMiniatura || '').trim();
+      if (/^https:\/\//i.test(link) && !links.includes(link)) links.push(link);
+    }
+  }
+  const principal = String(produto.imagemURL || '').trim();
+  if (!links.length && /^https:\/\//i.test(principal)) links.push(principal);
+  return links;
+}
+
+const carregarImagem = (blob: Blob) => new Promise<HTMLImageElement>((resolve, reject) => {
+  const url = URL.createObjectURL(blob);
+  const imagem = new Image();
+  imagem.onload = () => { URL.revokeObjectURL(url); resolve(imagem); };
+  imagem.onerror = () => { URL.revokeObjectURL(url); reject(new Error('O navegador não conseguiu abrir a imagem.')); };
+  imagem.src = url;
+});
+
+async function gerarCopiaMarketplace(url: string) {
+  const resposta = await fetch(`/api/imagem?url=${encodeURIComponent(url)}`);
+  if (!resposta.ok) throw new Error(`Não foi possível carregar uma das imagens (HTTP ${resposta.status}).`);
+  const imagem = await carregarImagem(await resposta.blob());
+  const canvas = document.createElement('canvas');
+  canvas.width = LADO_MARKETPLACE;
+  canvas.height = LADO_MARKETPLACE;
+  const contexto = canvas.getContext('2d');
+  if (!contexto) throw new Error('O navegador não conseguiu preparar a imagem.');
+  contexto.fillStyle = '#ffffff';
+  contexto.fillRect(0, 0, LADO_MARKETPLACE, LADO_MARKETPLACE);
+  contexto.imageSmoothingEnabled = true;
+  contexto.imageSmoothingQuality = 'high';
+  const escala = Math.min(LADO_MARKETPLACE / imagem.naturalWidth, LADO_MARKETPLACE / imagem.naturalHeight);
+  const largura = imagem.naturalWidth * escala;
+  const altura = imagem.naturalHeight * escala;
+  contexto.drawImage(imagem, (LADO_MARKETPLACE - largura) / 2, (LADO_MARKETPLACE - altura) / 2, largura, altura);
+  const blobFinal = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+  if (!blobFinal) throw new Error('O navegador não conseguiu criar o JPEG de teste.');
+  return { blob: blobFinal, larguraOriginal: imagem.naturalWidth, alturaOriginal: imagem.naturalHeight };
+}
+
+const tamanhoArquivo = (bytes: number) => bytes >= 1024 * 1024
+  ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 
 function filhosDe(id: number, categorias: CategoriaCatalogo[]) {
   return categorias
@@ -89,6 +165,15 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
   const [diagnosticando, setDiagnosticando] = useState(false);
   const [pagina, setPagina] = useState(1);
   const [diagnosticos, setDiagnosticos] = useState<Record<number, Diagnostico>>({});
+  const [somenteComFotos, setSomenteComFotos] = useState(true);
+  const [produtoTeste, setProdutoTeste] = useState<ProdutoTesteMarketplace>();
+  const [imagensTeste, setImagensTeste] = useState<ImagemTesteMarketplace[]>([]);
+  const [preparandoTeste, setPreparandoTeste] = useState(false);
+  const [simulandoImagens, setSimulandoImagens] = useState(false);
+  const [aplicandoImagens, setAplicandoImagens] = useState(false);
+  const [simulacaoImagens, setSimulacaoImagens] = useState<SimulacaoImagens>();
+  const [confirmacaoSku, setConfirmacaoSku] = useState('');
+  const [mensagemTeste, setMensagemTeste] = useState('');
 
   const segmentoAtualId = segmentoId;
   const categoriasDoSegmento = useMemo(() => segmentoAtualId ? filhosDe(segmentoAtualId, categorias) : [], [categorias, segmentoAtualId]);
@@ -129,9 +214,17 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idsConsulta.join(',')]);
 
+  useEffect(() => () => {
+    imagensTeste.forEach(imagem => URL.revokeObjectURL(imagem.urlPrevia));
+  }, [imagensTeste]);
+
   const porPagina = 50;
-  const totalPaginas = Math.max(1, Math.ceil(produtos.length / porPagina));
-  const visiveis = produtos.slice((pagina - 1) * porPagina, pagina * porPagina);
+  const produtosComFiltroDeFoto = useMemo(() => somenteComFotos
+    ? produtos.filter(item => String(item.imagemURL || '').trim())
+    : produtos, [produtos, somenteComFotos]);
+  const totalPaginas = Math.max(1, Math.ceil(produtosComFiltroDeFoto.length / porPagina));
+  const paginaSegura = Math.min(pagina, totalPaginas);
+  const visiveis = produtosComFiltroDeFoto.slice((paginaSegura - 1) * porPagina, paginaSegura * porPagina);
 
   const diagnosticarPagina = async () => {
     if (!visiveis.length) return;
@@ -148,6 +241,99 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
       aoErro(erro instanceof Error ? erro.message : 'Não foi possível conferir estoque, fotos e canais.');
     } finally {
       setDiagnosticando(false);
+    }
+  };
+
+  const abrirTesteDeFotos = async (item: ProdutoCatalogo) => {
+    setPreparandoTeste(true);
+    setMensagemTeste('Buscando as imagens atuais diretamente no Bling…');
+    setSimulacaoImagens(undefined);
+    setConfirmacaoSku('');
+    setProdutoTeste(undefined);
+    setImagensTeste([]);
+    aoErro('');
+    try {
+      const dados = await jsonDaResposta(await fetch(`/api/bling/administracao?recurso=produto&id=${item.id}`));
+      const produto = dados.produto && typeof dados.produto === 'object' ? dados.produto as Record<string, unknown> : {};
+      const links = linksDasImagens(produto);
+      if (!links.length) throw new Error('O detalhe deste produto não devolveu nenhuma imagem no Bling.');
+      if (links.length > 10) throw new Error('Este produto possui mais de 10 imagens. O teste foi bloqueado para evitar perda de fotos.');
+      setProdutoTeste({ id: item.id, codigo: String(produto.codigo || item.codigo), nome: String(produto.nome || item.nome), links });
+      setMensagemTeste(`${links.length} imagem(ns) encontrada(s). Preparando cópias sem alterar o Bling…`);
+      const geradas: ImagemTesteMarketplace[] = [];
+      for (let indice = 0; indice < links.length; indice++) {
+        const resultado = await gerarCopiaMarketplace(links[indice]);
+        geradas.push({
+          indice,
+          urlOriginal: links[indice],
+          urlPrevia: URL.createObjectURL(resultado.blob),
+          blob: resultado.blob,
+          larguraOriginal: resultado.larguraOriginal,
+          alturaOriginal: resultado.alturaOriginal,
+        });
+      }
+      setImagensTeste(geradas);
+      setMensagemTeste('Cópias prontas. Até aqui, nenhuma imagem do Bling foi alterada.');
+    } catch (erro) {
+      const mensagem = erro instanceof Error ? erro.message : 'Não foi possível preparar o teste.';
+      setMensagemTeste('');
+      aoErro(mensagem);
+    } finally {
+      setPreparandoTeste(false);
+    }
+  };
+
+  const simularTrocaDeImagens = async () => {
+    if (!produtoTeste || imagensTeste.length !== produtoTeste.links.length) return;
+    setSimulandoImagens(true);
+    setMensagemTeste('Salvando as cópias em uma pasta separada e preparando a simulação…');
+    aoErro('');
+    try {
+      const skuSeguro = (produtoTeste.codigo.replace(/[^a-zA-Z0-9._-]/g, '-') || `produto-${produtoTeste.id}`).slice(0, 80);
+      const urls: string[] = [];
+      for (const imagem of imagensTeste) {
+        const caminho = `${skuSeguro}-marketplace/${skuSeguro}_${imagem.indice + 1}_1200.jpg`;
+        const retorno = await jsonDaResposta(await fetch(`/api/upload?caminho=${encodeURIComponent(caminho)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'image/jpeg' },
+          body: imagem.blob,
+        }));
+        urls.push(String(retorno.url));
+      }
+      const simulacao = await jsonDaResposta(await fetch('/api/bling/administracao', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acao: 'simular-imagens', idProduto: produtoTeste.id, urls }),
+      })) as SimulacaoImagens;
+      setSimulacaoImagens(simulacao);
+      setMensagemTeste('Simulação pronta. Confira o corpo do PATCH e digite o SKU somente se quiser testar neste produto real.');
+    } catch (erro) {
+      setMensagemTeste('');
+      aoErro(erro instanceof Error ? erro.message : 'Não foi possível simular a troca das imagens.');
+    } finally {
+      setSimulandoImagens(false);
+    }
+  };
+
+  const aplicarTrocaDeImagens = async () => {
+    if (!produtoTeste || !simulacaoImagens) return;
+    setAplicandoImagens(true);
+    setMensagemTeste('Aplicando somente as imagens e conferindo novamente no Bling…');
+    aoErro('');
+    try {
+      const retorno = await jsonDaResposta(await fetch('/api/bling/administracao', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acao: 'aplicar-imagens', simulacao: simulacaoImagens.simulacao, confirmacao: confirmacaoSku }),
+      }));
+      setSimulacaoImagens(undefined);
+      setConfirmacaoSku('');
+      setMensagemTeste(`Teste concluído: o Bling confirmou ${retorno.quantidadeConfirmada} imagem(ns). Confira este produto nos canais antes de testar outro.`);
+    } catch (erro) {
+      setMensagemTeste('');
+      aoErro(erro instanceof Error ? erro.message : 'A conferência da troca falhou. Não teste outro produto até revisar este cadastro.');
+    } finally {
+      setAplicandoImagens(false);
     }
   };
 
@@ -212,11 +398,56 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
         </div>
       </div>
 
+      {(produtoTeste || preparandoTeste) && <section className="overflow-hidden rounded-2xl border-2 border-violet-200 bg-white shadow-[0_14px_40px_rgba(76,29,149,.08)]">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-violet-100 bg-violet-50 px-5 py-4">
+          <div>
+            <p className="text-[11px] font-black uppercase tracking-[.18em] text-violet-700">Teste controlado de imagens</p>
+            <h3 className="mt-1 text-lg font-black text-slate-950">{produtoTeste ? `${produtoTeste.codigo} · ${produtoTeste.nome}` : 'Carregando produto do Bling…'}</h3>
+            <p className="mt-1 text-xs font-semibold text-slate-600">Um produto por vez · cópias 1200×1200 · originais preservados até a confirmação pelo SKU</p>
+          </div>
+          <button type="button" disabled={preparandoTeste || aplicandoImagens} onClick={() => { setProdutoTeste(undefined); setImagensTeste([]); setSimulacaoImagens(undefined); setMensagemTeste(''); }} className="rounded-xl border border-violet-200 bg-white px-3 py-2 text-xs font-black text-violet-800 disabled:opacity-40">Fechar teste</button>
+        </div>
+
+        {mensagemTeste && <div role="status" className="border-b border-blue-100 bg-blue-50 px-5 py-3 text-sm font-bold text-blue-800">{mensagemTeste}</div>}
+        {produtoTeste && imagensTeste.length > 0 && <div className="p-5">
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            {imagensTeste.map(imagem => <article key={imagem.indice} className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={imagem.urlPrevia} alt={`Cópia ${imagem.indice + 1} de ${produtoTeste.nome}`} className="aspect-square w-full bg-white object-contain" />
+              <div className="space-y-1 p-3 text-xs text-slate-600">
+                <p className="font-black text-slate-900">Imagem {imagem.indice + 1}</p>
+                <p>Original: {imagem.larguraOriginal}×{imagem.alturaOriginal}</p>
+                <p>Nova: 1200×1200 · {tamanhoArquivo(imagem.blob.size)}</p>
+              </div>
+            </article>)}
+          </div>
+
+          {!simulacaoImagens && <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <p className="max-w-2xl text-sm font-semibold text-amber-950">O próximo botão apenas salva as cópias em uma pasta separada e monta a simulação. As fotos do produto no Bling ainda não serão trocadas.</p>
+            <button type="button" onClick={simularTrocaDeImagens} disabled={simulandoImagens || preparandoTeste} className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-black text-white disabled:opacity-40">{simulandoImagens ? 'Preparando simulação…' : 'Preparar simulação no Bling'}</button>
+          </div>}
+
+          {simulacaoImagens && <div className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-4">
+            <p className="text-xs font-black uppercase tracking-wider text-rose-700">Última barreira antes da alteração real</p>
+            <p className="mt-2 text-sm font-semibold text-rose-950">O servidor enviará somente <code className="rounded bg-white px-1 py-0.5">midia.imagens.imagensURL</code>. Digite <strong>{produtoTeste.codigo}</strong> para liberar este único produto.</p>
+            <details className="mt-3 rounded-xl border border-rose-100 bg-white p-3 text-xs text-slate-700">
+              <summary className="cursor-pointer font-black">Ver corpo exato do PATCH</summary>
+              <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(simulacaoImagens.corpoPatch, null, 2)}</pre>
+            </details>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <input value={confirmacaoSku} onChange={evento => setConfirmacaoSku(evento.target.value)} className="min-w-[240px] flex-1 rounded-xl border border-rose-300 bg-white px-3 py-2.5 text-sm font-bold" placeholder={`Digite ${produtoTeste.codigo}`} />
+              <button type="button" onClick={aplicarTrocaDeImagens} disabled={aplicandoImagens || confirmacaoSku !== produtoTeste.codigo} className="rounded-xl bg-rose-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{aplicandoImagens ? 'Aplicando e conferindo…' : 'Aplicar em 1 produto'}</button>
+            </div>
+          </div>}
+        </div>}
+      </section>}
+
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_10px_35px_rgba(15,23,42,.05)]">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
-          <div><p className="text-xs font-black uppercase tracking-wider text-cyan-700">Produtos do filtro</p><p className="mt-1 text-sm text-slate-500"><strong className="text-slate-900">{produtos.length}</strong> encontrados{truncado ? ' · limite seguro atingido' : ''}</p></div>
+          <div><p className="text-xs font-black uppercase tracking-wider text-cyan-700">Produtos do filtro</p><p className="mt-1 text-sm text-slate-500"><strong className="text-slate-900">{produtosComFiltroDeFoto.length}</strong> exibidos de {produtos.length}{truncado ? ' · limite seguro atingido' : ''}</p></div>
           <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={() => baixarProdutos(produtos, categorias)} disabled={!produtos.length} className="rounded-xl border border-slate-300 px-3 py-2 text-xs font-black text-slate-700 disabled:opacity-40">Exportar para balanço</button>
+            <button type="button" onClick={() => { setSomenteComFotos(valor => !valor); setPagina(1); }} className={`rounded-xl px-3 py-2 text-xs font-black ${somenteComFotos ? 'bg-emerald-100 text-emerald-800' : 'border border-slate-300 text-slate-700'}`}>{somenteComFotos ? '✓ Somente com fotos' : 'Mostrar somente com fotos'}</button>
+            <button type="button" onClick={() => baixarProdutos(produtosComFiltroDeFoto, categorias)} disabled={!produtosComFiltroDeFoto.length} className="rounded-xl border border-slate-300 px-3 py-2 text-xs font-black text-slate-700 disabled:opacity-40">Exportar para balanço</button>
             <button type="button" onClick={diagnosticarPagina} disabled={!visiveis.length || diagnosticando} className="rounded-xl bg-amber-100 px-3 py-2 text-xs font-black text-amber-900 disabled:opacity-40">{diagnosticando ? 'Conferindo no Bling…' : 'Conferir estoque, fotos e canais'}</button>
           </div>
         </div>
@@ -233,13 +464,13 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
                 <td className="px-4 py-3 font-bold">{diagnostico ? diagnostico.saldoFisico.toLocaleString('pt-BR') : aguardandoDiagnostico}</td>
                 <td className="px-4 py-3">{diagnostico ? (diagnostico.quantidadeImagens ? <span className="font-bold text-emerald-700">Sim</span> : <span className="font-bold text-rose-700">Não</span>) : aguardandoDiagnostico}</td>
                 <td className="px-4 py-3">{diagnostico ? (diagnostico.canalConferido ? diagnostico.quantidadeCanais : <span className="font-bold text-amber-700">Não verificado</span>) : aguardandoDiagnostico}</td>
-                <td className="px-5 py-3 text-right"><button type="button" onClick={() => aoAbrir(item)} className="rounded-lg bg-[#071a24] px-3 py-2 text-xs font-black text-white">Abrir editor</button></td>
+                <td className="px-5 py-3 text-right"><div className="flex justify-end gap-2"><button type="button" onClick={() => void abrirTesteDeFotos(item)} disabled={preparandoTeste || aplicandoImagens} className="rounded-lg bg-violet-100 px-3 py-2 text-xs font-black text-violet-800 disabled:opacity-40">Testar fotos</button><button type="button" onClick={() => aoAbrir(item)} className="rounded-lg bg-[#071a24] px-3 py-2 text-xs font-black text-white">Abrir editor</button></div></td>
               </tr>;
             })}</tbody>
           </table>
         </div>
-        {!carregando && !produtos.length && <div className="grid min-h-40 place-items-center px-5 text-center text-sm text-slate-500">Nenhum produto foi encontrado neste nível.</div>}
-        {produtos.length > porPagina && <div className="flex items-center justify-between border-t border-slate-200 px-5 py-3 text-sm"><button type="button" onClick={() => setPagina(valor => Math.max(1, valor - 1))} disabled={pagina === 1} className="font-black text-blue-700 disabled:text-slate-300">Anterior</button><span className="text-slate-500">Página {pagina} de {totalPaginas}</span><button type="button" onClick={() => setPagina(valor => Math.min(totalPaginas, valor + 1))} disabled={pagina === totalPaginas} className="font-black text-blue-700 disabled:text-slate-300">Próxima</button></div>}
+        {!carregando && !produtosComFiltroDeFoto.length && <div className="grid min-h-40 place-items-center px-5 text-center text-sm text-slate-500">{produtos.length ? 'Nenhum dos produtos deste nível possui foto no resumo do Bling.' : 'Nenhum produto foi encontrado neste nível.'}</div>}
+        {produtosComFiltroDeFoto.length > porPagina && <div className="flex items-center justify-between border-t border-slate-200 px-5 py-3 text-sm"><button type="button" onClick={() => setPagina(valor => Math.max(1, valor - 1))} disabled={paginaSegura === 1} className="font-black text-blue-700 disabled:text-slate-300">Anterior</button><span className="text-slate-500">Página {paginaSegura} de {totalPaginas}</span><button type="button" onClick={() => setPagina(valor => Math.min(totalPaginas, valor + 1))} disabled={paginaSegura === totalPaginas} className="font-black text-blue-700 disabled:text-slate-300">Próxima</button></div>}
       </div>
     </div>
   );
