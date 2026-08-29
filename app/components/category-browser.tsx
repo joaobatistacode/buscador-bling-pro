@@ -57,6 +57,33 @@ type ReposicaoImagens = {
   expiraEm: number;
 };
 
+type LoteImagens = {
+  id: string;
+  status: 'PRONTO' | 'EM_ANDAMENTO' | 'PAUSADO' | 'FINALIZADO' | 'REVISAO' | 'CANCELADO';
+  total: number;
+  pendentes: number;
+  processando: number;
+  concluidos: number;
+  ignorados: number;
+  falhas: number;
+  created_at: string;
+};
+
+type ItemLoteImagens = {
+  id: string;
+  lote_id: string;
+  posicao: number;
+  id_produto_bling: number;
+  codigo: string;
+  produto: string;
+  status: 'PENDENTE' | 'PROCESSANDO' | 'CONCLUIDO' | 'IGNORADO' | 'FALHA' | 'REVISAO';
+  etapa: string;
+  urls_marketplace?: string[];
+  motivo?: string | null;
+  tentativas: number;
+  concluido_em?: string | null;
+};
+
 type Props = {
   categorias: CategoriaCatalogo[];
   produtoAberto?: number;
@@ -206,6 +233,15 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
   const [reposicaoImagens, setReposicaoImagens] = useState<ReposicaoImagens>();
   const [confirmacaoSku, setConfirmacaoSku] = useState('');
   const [mensagemTeste, setMensagemTeste] = useState('');
+  const [selecionadosLote, setSelecionadosLote] = useState<Record<number, ProdutoCatalogo>>({});
+  const [loteImagens, setLoteImagens] = useState<LoteImagens>();
+  const [itensLote, setItensLote] = useState<ItemLoteImagens[]>([]);
+  const [abaLote, setAbaLote] = useState<'FILA' | 'CONCLUIDOS'>('FILA');
+  const [carregandoLote, setCarregandoLote] = useState(false);
+  const [executandoLote, setExecutandoLote] = useState(false);
+  const [itemAtualLote, setItemAtualLote] = useState<ItemLoteImagens>();
+  const [confirmacaoLote, setConfirmacaoLote] = useState('');
+  const interromperLote = useRef(false);
   const controladorConsulta = useRef<AbortController | undefined>(undefined);
   const sequenciaConsulta = useRef(0);
 
@@ -271,6 +307,218 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
   const totalPaginas = Math.max(1, Math.ceil(produtosComFiltroDeFoto.length / porPagina));
   const paginaSegura = Math.min(pagina, totalPaginas);
   const visiveis = produtosComFiltroDeFoto.slice((paginaSegura - 1) * porPagina, paginaSegura * porPagina);
+
+  const apiLote = async (pedido: Record<string, unknown>) => jsonDaResposta(await fetch('/api/bling/imagens-lote', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(pedido),
+  }));
+
+  const carregarLote = async (id?: string) => {
+    setCarregandoLote(true);
+    try {
+      let loteId = id;
+      if (!loteId) {
+        const resumo = await jsonDaResposta(await fetch('/api/bling/imagens-lote'));
+        const lotes = Array.isArray(resumo.lotes) ? resumo.lotes as LoteImagens[] : [];
+        loteId = lotes[0]?.id;
+      }
+      if (!loteId) {
+        setLoteImagens(undefined);
+        setItensLote([]);
+        return;
+      }
+      const dados = await jsonDaResposta(await fetch(`/api/bling/imagens-lote?id=${encodeURIComponent(loteId)}`));
+      setLoteImagens(dados.lote as LoteImagens);
+      setItensLote(Array.isArray(dados.itens) ? dados.itens as ItemLoteImagens[] : []);
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'Não foi possível carregar a fila de imagens.');
+    } finally {
+      setCarregandoLote(false);
+    }
+  };
+
+  useEffect(() => {
+    const atraso = window.setTimeout(() => { void carregarLote(); }, 0);
+    return () => window.clearTimeout(atraso);
+    // A fila é persistente e precisa ser recuperada somente na abertura do catálogo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const alternarSelecaoLote = (item: ProdutoCatalogo) => {
+    setSelecionadosLote(atual => {
+      const proximo = { ...atual };
+      if (proximo[item.id]) delete proximo[item.id];
+      else if (Object.keys(proximo).length < 500) proximo[item.id] = item;
+      return proximo;
+    });
+  };
+
+  const selecionarProdutosLote = (lista: ProdutoCatalogo[]) => {
+    setSelecionadosLote(atual => {
+      const proximo = { ...atual };
+      for (const item of lista) {
+        if (Object.keys(proximo).length >= 500) break;
+        proximo[item.id] = item;
+      }
+      return proximo;
+    });
+  };
+
+  const criarLoteImagens = async () => {
+    const selecionados = Object.values(selecionadosLote);
+    if (!selecionados.length || selecionados.length > 500) return;
+    setCarregandoLote(true);
+    aoErro('');
+    try {
+      const retorno = await apiLote({ acao: 'criar', produtos: selecionados });
+      setSelecionadosLote({});
+      setConfirmacaoLote('');
+      setAbaLote('FILA');
+      await carregarLote(String(retorno.lote.id));
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'Não foi possível criar o lote.');
+    } finally {
+      setCarregandoLote(false);
+    }
+  };
+
+  const atualizarItemLote = async (
+    loteId: string,
+    itemId: string,
+    status: ItemLoteImagens['status'],
+    etapa: string,
+    motivo?: string,
+    urls?: string[],
+  ) => apiLote({ acao: 'atualizar-item', loteId, itemId, status, etapa, motivo, urls });
+
+  const processarItemLote = async (loteId: string, item: ItemLoteImagens) => {
+    let alteracaoPodeTerSidoEnviada = false;
+    try {
+      const dadosBling = await fetch(`/api/bling/administracao?recurso=produto&id=${item.id_produto_bling}`).then(jsonDaResposta);
+      const produto = dadosBling.produto && typeof dadosBling.produto === 'object' ? dadosBling.produto as Record<string, unknown> : {};
+      const codigo = String(produto.codigo || item.codigo).trim();
+      const dadosSupabase = await fetch(`/api/bling/administracao?recurso=imagens-supabase&codigo=${encodeURIComponent(codigo)}`).then(jsonDaResposta);
+      const originais: string[] = [...new Set<string>((Array.isArray(dadosSupabase.imagens) ? dadosSupabase.imagens : [])
+        .map((link: unknown) => String(link || '').trim()).filter((link: string) => /^https:\/\//i.test(link)))];
+      const copiasExistentes: string[] = [...new Set<string>((Array.isArray(dadosSupabase.imagensMarketplace) ? dadosSupabase.imagensMarketplace : [])
+        .map((link: unknown) => String(link || '').trim()).filter((link: string) => /^https:\/\//i.test(link)))];
+      const urls: string[] = [...new Set<string>((Array.isArray(item.urls_marketplace) ? item.urls_marketplace : [])
+        .map(link => String(link || '').trim()).filter(link => /^https:\/\//i.test(link)))];
+
+      if (!urls.length && copiasExistentes.length) {
+        await atualizarItemLote(loteId, item.id, 'IGNORADO', 'JA_CONVERTIDO', `${copiasExistentes.length} cópia(s) 1200×1200 já existentes.`);
+        return;
+      }
+      if (!originais.length) throw new Error('Nenhuma imagem original foi encontrada no Storage do Supabase.');
+      if (originais.length > 10) throw new Error('Mais de 10 imagens originais; produto enviado para revisão.');
+
+      if (!urls.length) {
+        const skuSeguro = (codigo.replace(/[^a-zA-Z0-9._-]/g, '-') || `produto-${item.id_produto_bling}`).slice(0, 80);
+        for (let indice = 0; indice < originais.length; indice++) {
+          const copia = await gerarCopiaMarketplace(originais[indice]);
+          const caminho = `${skuSeguro}-marketplace/${skuSeguro}_${indice + 1}_1200.jpg`;
+          const retorno = await jsonDaResposta(await fetch(`/api/upload?caminho=${encodeURIComponent(caminho)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'image/jpeg' },
+            body: copia.blob,
+          }));
+          urls.push(String(retorno.url));
+        }
+        await atualizarItemLote(loteId, item.id, 'PROCESSANDO', 'COPIAS_1200_PRONTAS', undefined, urls);
+      }
+
+      const simulacao = await jsonDaResposta(await fetch('/api/bling/administracao', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acao: 'simular-imagens', idProduto: item.id_produto_bling, modo: 'remover-reaplicar', urls }),
+      })) as SimulacaoImagens;
+      let simulacaoAplicacao = simulacao.simulacaoAplicacao;
+      if (!simulacaoAplicacao) {
+        alteracaoPodeTerSidoEnviada = true;
+        const remocao = await jsonDaResposta(await fetch('/api/bling/administracao', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ acao: 'remover-imagens', simulacao: simulacao.simulacao, confirmacao: codigo }),
+        }));
+        simulacaoAplicacao = String(remocao.simulacaoAplicacao || '');
+      }
+      if (!simulacaoAplicacao) throw new Error('O Bling não liberou a etapa de aplicação das imagens.');
+      alteracaoPodeTerSidoEnviada = true;
+      const aplicado = await jsonDaResposta(await fetch('/api/bling/administracao', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acao: 'aplicar-imagens', simulacao: simulacaoAplicacao, confirmacao: codigo }),
+      }));
+      await atualizarItemLote(
+        loteId,
+        item.id,
+        'CONCLUIDO',
+        'ENVIADO_BLING',
+        `${Number(aplicado.quantidadeConfirmada || urls.length)} imagem(ns) 1200×1200 confirmada(s) no Bling.`,
+        urls,
+      );
+    } catch (erro) {
+      const mensagem = erro instanceof Error ? erro.message : 'Falha não identificada.';
+      await atualizarItemLote(
+        loteId,
+        item.id,
+        alteracaoPodeTerSidoEnviada ? 'REVISAO' : 'FALHA',
+        alteracaoPodeTerSidoEnviada ? 'CONFERIR_BLING' : 'FALHA_PREPARACAO',
+        mensagem,
+      ).catch(() => null);
+    }
+  };
+
+  const executarLoteImagens = async () => {
+    if (!loteImagens || confirmacaoLote !== 'ENVIAR') return;
+    interromperLote.current = false;
+    setExecutandoLote(true);
+    setAbaLote('FILA');
+    aoErro('');
+    try {
+      await apiLote({ acao: 'iniciar', loteId: loteImagens.id });
+      while (!interromperLote.current) {
+        const retorno = await apiLote({ acao: 'reivindicar', loteId: loteImagens.id });
+        if (retorno.pausado || retorno.finalizado) break;
+        if (retorno.concorrencia) continue;
+        const item = retorno.item as ItemLoteImagens | undefined;
+        if (!item) break;
+        setItemAtualLote(item);
+        await processarItemLote(loteImagens.id, item);
+        await carregarLote(loteImagens.id);
+      }
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'O processamento do lote foi interrompido.');
+    } finally {
+      setItemAtualLote(undefined);
+      setExecutandoLote(false);
+      await carregarLote(loteImagens.id);
+    }
+  };
+
+  const pausarLoteImagens = async () => {
+    if (!loteImagens) return;
+    interromperLote.current = true;
+    try {
+      await apiLote({ acao: 'pausar', loteId: loteImagens.id });
+      await carregarLote(loteImagens.id);
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'Não foi possível pausar o lote.');
+    }
+  };
+
+  const tentarFalhasNovamente = async () => {
+    if (!loteImagens) return;
+    try {
+      await apiLote({ acao: 'tentar-novamente', loteId: loteImagens.id });
+      setConfirmacaoLote('');
+      setAbaLote('FILA');
+      await carregarLote(loteImagens.id);
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'Não foi possível preparar as novas tentativas.');
+    }
+  };
 
   const diagnosticarPagina = async () => {
     if (!visiveis.length) return;
@@ -471,6 +719,15 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
     setSomenteNivel(false);
   };
 
+  const quantidadeSelecionada = Object.keys(selecionadosLote).length;
+  const itensFilaLote = itensLote.filter(item => !['CONCLUIDO', 'IGNORADO'].includes(item.status));
+  const itensConcluidosLote = itensLote.filter(item => ['CONCLUIDO', 'IGNORADO'].includes(item.status));
+  const itensExibidosLote = abaLote === 'FILA' ? itensFilaLote : itensConcluidosLote;
+  const progressoLote = loteImagens?.total
+    ? Math.round(((loteImagens.concluidos + loteImagens.ignorados + loteImagens.falhas) / loteImagens.total) * 100)
+    : 0;
+  const loteAberto = Boolean(loteImagens && ['PRONTO', 'EM_ANDAMENTO', 'PAUSADO'].includes(loteImagens.status));
+
   return (
     <div className="space-y-5">
       <div className="overflow-x-auto rounded-2xl bg-[#101d27] p-2 shadow-[0_12px_32px_rgba(7,26,36,.18)]">
@@ -534,7 +791,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
             {produtoTeste && <p className="mt-2 inline-flex rounded-full bg-amber-100 px-3 py-1 text-xs font-black text-amber-900">{produtoTeste.linksAtuais.length} no Bling → zero → {produtoTeste.linksParaGerar.length} convertidas</p>}
           </div>
           <div className="flex flex-wrap gap-2">
-            <button type="button" disabled className="rounded-xl bg-slate-300 px-3 py-2 text-xs font-black text-slate-600">Enviar lote de até 500 · bloqueado</button>
+            <button type="button" onClick={() => document.getElementById('lote-imagens')?.scrollIntoView({ behavior: 'smooth' })} className="rounded-xl bg-violet-700 px-3 py-2 text-xs font-black text-white">Abrir processamento em lote</button>
             <button type="button" disabled={preparandoTeste || removendoImagens || aplicandoImagens} onClick={() => { setProdutoTeste(undefined); setImagensTeste([]); setSimulacaoImagens(undefined); setReposicaoImagens(undefined); setConfirmacaoSku(''); setMensagemTeste(''); }} className="rounded-xl border border-violet-200 bg-white px-3 py-2 text-xs font-black text-violet-800 disabled:opacity-40">Fechar teste</button>
           </div>
         </div>
@@ -584,6 +841,75 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
         </div>}
       </section>}
 
+      <section id="lote-imagens" className="overflow-hidden rounded-3xl border-2 border-cyan-200 bg-white shadow-[0_18px_55px_rgba(8,145,178,.12)]">
+        <div className="bg-[#071a24] px-5 py-5 text-white">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-[11px] font-black uppercase tracking-[.2em] text-cyan-300">Central de imagens 1200×1200</p>
+              <h3 className="mt-1 text-xl font-black">Seleção e envio de até 500 produtos</h3>
+              <p className="mt-2 max-w-3xl text-sm text-slate-300">Os produtos são processados um por vez. Ao concluir, saem da fila e aparecem na aba Concluídos. A fila fica salva para pausa e retomada.</p>
+            </div>
+            <div className="rounded-2xl bg-white/10 px-4 py-3 text-right">
+              <p className="text-xs font-bold text-slate-300">Selecionados agora</p>
+              <p className="text-2xl font-black text-cyan-300">{quantidadeSelecionada}<span className="text-sm text-slate-400"> / 500</span></p>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => selecionarProdutosLote(visiveis)} disabled={!visiveis.length || quantidadeSelecionada >= 500 || loteAberto} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-700 disabled:opacity-40">Selecionar os 50 visíveis</button>
+            <button type="button" onClick={() => selecionarProdutosLote(produtosComFiltroDeFoto.slice(0, 500))} disabled={!produtosComFiltroDeFoto.length || quantidadeSelecionada >= 500 || loteAberto} className="rounded-xl border border-cyan-300 bg-cyan-50 px-3 py-2 text-xs font-black text-cyan-900 disabled:opacity-40">Selecionar até 500 deste resultado</button>
+            <button type="button" onClick={() => setSelecionadosLote({})} disabled={!quantidadeSelecionada || loteAberto} className="rounded-xl px-3 py-2 text-xs font-black text-rose-700 disabled:opacity-40">Limpar seleção</button>
+            <button type="button" onClick={criarLoteImagens} disabled={!quantidadeSelecionada || quantidadeSelecionada > 500 || loteAberto || carregandoLote} className="ml-auto rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{carregandoLote ? 'Salvando fila…' : `Criar fila com ${quantidadeSelecionada} produto(s)`}</button>
+          </div>
+          {loteAberto && <p className="mt-2 text-xs font-semibold text-amber-700">Finalize ou revise o lote atual antes de criar uma nova fila.</p>}
+        </div>
+
+        {loteImagens ? <div className="p-5">
+          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
+            {[
+              ['Total', loteImagens.total, 'text-slate-950'],
+              ['Pendentes', loteImagens.pendentes, 'text-blue-700'],
+              ['Processando', loteImagens.processando, 'text-violet-700'],
+              ['Enviados', loteImagens.concluidos, 'text-emerald-700'],
+              ['Já prontos', loteImagens.ignorados, 'text-amber-700'],
+              ['Revisar', loteImagens.falhas, 'text-rose-700'],
+            ].map(([rotulo, valor, cor]) => <div key={String(rotulo)} className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm"><p className="text-[10px] font-black uppercase tracking-wider text-slate-500">{rotulo}</p><p className={`mt-1 text-2xl font-black ${cor}`}>{valor}</p></div>)}
+          </div>
+
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex items-center justify-between gap-3 text-xs font-black text-slate-700"><span>Status: {loteImagens.status.replaceAll('_', ' ')}</span><span>{progressoLote}%</span></div>
+            <div className="mt-2 h-3 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all" style={{ width: `${progressoLote}%` }} /></div>
+            {itemAtualLote && <p className="mt-3 text-sm font-bold text-violet-800">Processando agora: {itemAtualLote.codigo} · {itemAtualLote.produto}</p>}
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            {loteImagens.status !== 'EM_ANDAMENTO' && loteImagens.pendentes > 0 && <>
+              <input value={confirmacaoLote} onChange={evento => setConfirmacaoLote(evento.target.value.toUpperCase())} className="min-w-[190px] rounded-xl border border-slate-300 px-3 py-2.5 text-sm font-black" placeholder="Digite ENVIAR" />
+              <button type="button" onClick={executarLoteImagens} disabled={executandoLote || confirmacaoLote !== 'ENVIAR'} className="rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{loteImagens.status === 'PAUSADO' ? 'Retomar envio' : 'Iniciar envio ao Bling'}</button>
+            </>}
+            {(executandoLote || loteImagens.status === 'EM_ANDAMENTO') && <button type="button" onClick={pausarLoteImagens} className="rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-black text-amber-950">Pausar com segurança</button>}
+            {loteImagens.falhas > 0 && !executandoLote && <button type="button" onClick={tentarFalhasNovamente} className="rounded-xl border border-rose-300 bg-rose-50 px-4 py-2.5 text-sm font-black text-rose-800">Tentar falhas novamente</button>}
+            <button type="button" onClick={() => void carregarLote(loteImagens.id)} disabled={carregandoLote} className="ml-auto rounded-xl border border-slate-300 px-3 py-2.5 text-xs font-black text-slate-700 disabled:opacity-40">Atualizar</button>
+          </div>
+
+          <div className="mt-5 flex gap-2 border-b border-slate-200">
+            <button type="button" onClick={() => setAbaLote('FILA')} className={`border-b-2 px-4 py-3 text-sm font-black ${abaLote === 'FILA' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>Fila ({itensFilaLote.length})</button>
+            <button type="button" onClick={() => setAbaLote('CONCLUIDOS')} className={`border-b-2 px-4 py-3 text-sm font-black ${abaLote === 'CONCLUIDOS' ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-slate-500'}`}>Concluídos ({itensConcluidosLote.length})</button>
+          </div>
+
+          <div className="mt-3 max-h-[430px] space-y-2 overflow-auto pr-1">
+            {itensExibidosLote.map(item => <article key={item.id} className={`flex flex-wrap items-center gap-3 rounded-2xl border p-3 ${item.status === 'PROCESSANDO' ? 'border-violet-300 bg-violet-50' : item.status === 'CONCLUIDO' ? 'border-emerald-200 bg-emerald-50' : item.status === 'IGNORADO' ? 'border-amber-200 bg-amber-50' : item.status === 'FALHA' || item.status === 'REVISAO' ? 'border-rose-200 bg-rose-50' : 'border-slate-200 bg-white'}`}>
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-900 text-xs font-black text-white">{item.posicao}</span>
+              <div className="min-w-0 flex-1"><p className="truncate text-sm font-black text-slate-950"><span className="font-mono text-cyan-700">{item.codigo}</span> · {item.produto}</p><p className="mt-1 text-xs font-semibold text-slate-600">{item.motivo || item.etapa.replaceAll('_', ' ')}</p></div>
+              <span className="rounded-full bg-white px-3 py-1 text-[10px] font-black uppercase text-slate-700 shadow-sm">{item.status.replaceAll('_', ' ')}</span>
+            </article>)}
+            {!itensExibidosLote.length && <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm font-semibold text-slate-500">Nenhum produto nesta aba.</div>}
+          </div>
+        </div> : <div className="p-8 text-center"><p className="text-sm font-bold text-slate-600">Selecione os produtos na lista abaixo e crie a primeira fila.</p></div>}
+      </section>
+
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_10px_35px_rgba(15,23,42,.05)]">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div><p className="text-xs font-black uppercase tracking-wider text-cyan-700">Produtos do filtro</p><p className="mt-1 text-sm text-slate-500"><strong className="text-slate-900">{produtosComFiltroDeFoto.length}</strong> exibidos de {produtos.length}{truncado ? ' · limite seguro atingido' : ''}</p></div>
@@ -596,11 +922,12 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
         {truncado && <div role="alert" className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-xs font-semibold text-amber-900">A consulta parou em 2.000 produtos. Refine por categoria para obter um balanço completo.</div>}
         {produtos.length > 0 && <div className="border-b border-blue-100 bg-blue-50/70 px-5 py-2.5 text-xs font-semibold text-blue-800">Estoque, fotos e canais são conferidos para os 50 produtos da página visível. Use o botão acima em cada página.</div>}
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[820px] text-left text-sm">
-            <thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3">SKU / produto</th><th className="px-4 py-3">Categoria atual</th><th className="px-4 py-3">Estoque</th><th className="px-4 py-3">Tem foto</th><th className="px-4 py-3">Canais</th><th className="px-5 py-3 text-right">Ação</th></tr></thead>
+          <table className="w-full min-w-[900px] text-left text-sm">
+            <thead><tr className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-4 py-3"><input type="checkbox" aria-label="Selecionar página" checked={Boolean(visiveis.length) && visiveis.every(item => Boolean(selecionadosLote[item.id]))} onChange={evento => evento.target.checked ? selecionarProdutosLote(visiveis) : setSelecionadosLote(atual => { const proximo = { ...atual }; visiveis.forEach(item => delete proximo[item.id]); return proximo; })} disabled={loteAberto} className="h-4 w-4 accent-blue-600" /></th><th className="px-5 py-3">SKU / produto</th><th className="px-4 py-3">Categoria atual</th><th className="px-4 py-3">Estoque</th><th className="px-4 py-3">Tem foto</th><th className="px-4 py-3">Canais</th><th className="px-5 py-3 text-right">Ação</th></tr></thead>
             <tbody>{visiveis.map(item => {
               const diagnostico = diagnosticos[item.id];
               return <tr key={item.id} className={`border-t border-slate-100 ${diagnostico?.alerta ? 'bg-rose-50/70' : produtoAberto === item.id ? 'bg-cyan-50' : ''}`}>
+                <td className="px-4 py-3"><input type="checkbox" aria-label={`Selecionar ${item.codigo}`} checked={Boolean(selecionadosLote[item.id])} onChange={() => alternarSelecaoLote(item)} disabled={loteAberto || (!selecionadosLote[item.id] && quantidadeSelecionada >= 500)} className="h-4 w-4 accent-blue-600" /></td>
                 <td className="px-5 py-3"><span className="font-mono text-xs font-black text-cyan-700">{item.codigo}</span><span className="mt-1 block max-w-xl font-bold text-slate-900">{item.nome}</span>{diagnostico?.alerta && <span className="mt-1 inline-block rounded-full bg-rose-100 px-2 py-1 text-[10px] font-black uppercase text-rose-700">Com estoque, sem foto e fora dos canais</span>}</td>
                 <td className="px-4 py-3 text-slate-600">{porId.get(Number(item.categoria?.id))?.descricao || <span className="font-semibold text-amber-700">Categoria não informada</span>}</td>
                 <td className="px-4 py-3 font-bold">{diagnostico ? diagnostico.saldoFisico.toLocaleString('pt-BR') : aguardandoDiagnostico}</td>
