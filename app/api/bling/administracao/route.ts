@@ -303,7 +303,7 @@ function validarNovasImagens(valor: unknown, quantidadeEsperada: number) {
   const hostPermitido = new URL(base).host;
   const urls = [...new Set(valor.map(item => String(item || '').trim()))];
   if (urls.length !== valor.length || urls.length !== quantidadeEsperada) {
-    throw new Error(`A troca deve preservar exatamente as ${quantidadeEsperada} imagens atuais, sem repetições.`);
+    throw new Error(`A reposição deve conter exatamente ${quantidadeEsperada} imagem(ns), sem repetições.`);
   }
   for (const item of urls) {
     let url: URL;
@@ -521,6 +521,21 @@ export async function GET(request: Request) {
       return Response.json({ produto });
     }
 
+    if (recurso === 'imagens-supabase') {
+      const codigo = texto(url.searchParams.get('codigo'), 120, 'SKU');
+      const [historico] = await supabaseRest(
+        `bling_produtos?codigo=eq.${encodeURIComponent(codigo)}&select=codigo,nome,imagens&limit=1`,
+        { method: 'GET' },
+      ) as Array<{ codigo?: string; nome?: string; imagens?: unknown }>;
+      const imagens = (Array.isArray(historico?.imagens) ? historico.imagens : [])
+        .map(item => String(item || '').trim())
+        .filter(link => /^https:\/\//i.test(link));
+      if (!imagens.length) {
+        throw falhaApi('Nenhuma imagem salva no Supabase foi encontrada para este SKU.', 'IMAGENS_SUPABASE_AUSENTES');
+      }
+      return Response.json({ produto: { codigo: historico.codigo, nome: historico.nome }, imagens });
+    }
+
     if (recurso === 'campos') {
       const modulo = inteiro(url.searchParams.get('modulo'), 'Módulo');
       const campos = await listarTudo(`/campos-customizados/modulos/${modulo}`, token, 50);
@@ -572,13 +587,6 @@ export async function POST(request: Request) {
     const pedido = JSON.parse(new TextDecoder().decode(bruto)) as Objeto;
     const acao = String(pedido.acao || '');
     contextoLog.acao = acao || 'desconhecida';
-    if (acao === 'aplicar-imagens') {
-      contextoLog.etapa = 'bloqueio-emergencial-imagens';
-      throw falhaApi(
-        'O envio de imagens ao Bling está temporariamente bloqueado para impedir novas duplicações. A simulação continua disponível, mas nenhuma imagem será alterada.',
-        'ALTERACAO_IMAGENS_BLOQUEADA',
-      );
-    }
     contextoLog.etapa = 'obter-token-bling';
     const token = await tokenDaSessao();
 
@@ -589,22 +597,25 @@ export async function POST(request: Request) {
       const atual = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
       if (!atual) throw new Error('O Bling não devolveu o produto.');
       const linksAtuais = linksDasImagens(atual);
-      if (!linksAtuais.length) throw new Error('O produto não possui imagens no Bling.');
-      const reparoDuplicacao = pedido.modo === 'reparar-duplicacao';
-      contextoLog.modo = reparoDuplicacao ? 'reparar-duplicacao' : 'substituir';
-      const quantidadeNova = Array.isArray(pedido.urls) ? pedido.urls.length : 0;
-      if (reparoDuplicacao && linksAtuais.length !== quantidadeNova * 2) {
-        throw new Error(`O reparo exige exatamente o dobro de imagens atuais. O Bling devolveu ${linksAtuais.length} e o reparo contém ${quantidadeNova}.`);
+      const reposicaoSegura = pedido.modo === 'remover-reaplicar';
+      contextoLog.modo = reposicaoSegura ? 'remover-reaplicar' : 'bloqueado';
+      if (!reposicaoSegura) {
+        throw falhaApi(
+          'O fluxo antigo de substituição foi bloqueado. Prepare a reposição segura com remoção confirmada antes da aplicação.',
+          'FLUXO_IMAGENS_ANTIGO_BLOQUEADO',
+        );
       }
-      const linksNovos = validarNovasImagens(pedido.urls, reparoDuplicacao ? quantidadeNova : linksAtuais.length);
+      const quantidadeNova = Array.isArray(pedido.urls) ? pedido.urls.length : 0;
+      const linksNovos = validarNovasImagens(pedido.urls, quantidadeNova);
       const codigo = texto(atual.codigo, 120, 'SKU do produto');
       contextoLog.codigo = codigo;
       contextoLog.etapa = 'assinar-simulacao-imagens';
+      const produtoSemImagens = linksAtuais.length === 0;
       const planoImagens = { midia: { imagens: { imagensURL: linksNovos.map(link => ({ link })) } } };
       const plano = {
         versao: 1,
-        tipo: 'imagens-marketplace',
-        modo: reparoDuplicacao ? 'reparar-duplicacao' : 'substituir',
+        tipo: produtoSemImagens ? 'reposicao-imagens' : 'preparar-reposicao-imagens',
+        modo: produtoSemImagens ? 'apos-remocao-confirmada' : 'remover-reaplicar',
         idProduto,
         codigo,
         linksAtuais,
@@ -614,8 +625,11 @@ export async function POST(request: Request) {
         hashAtual: hash(retratoParaSimulacaoDeImagens(atual)),
         expiraEm: Date.now() + 10 * 60 * 1000,
       };
+      const simulacao = assinar(plano);
       return Response.json({
-        simulacao: assinar(plano),
+        simulacao,
+        simulacaoAplicacao: produtoSemImagens ? simulacao : undefined,
+        produtoSemImagens,
         expiraEm: plano.expiraEm,
         modo: plano.modo,
         produto: { id: idProduto, codigo, nome: atual.nome },
@@ -625,10 +639,85 @@ export async function POST(request: Request) {
       });
     }
 
+    if (acao === 'remover-imagens') {
+      contextoLog.etapa = 'validar-simulacao-remocao';
+      const plano = conferirAssinatura(pedido.simulacao);
+      if (plano.tipo !== 'preparar-reposicao-imagens' || plano.modo !== 'remover-reaplicar') {
+        throw falhaApi('Esta simulação não pertence ao fluxo seguro de reposição de imagens.', 'SIMULACAO_INVALIDA');
+      }
+      const codigo = texto(plano.codigo, 120, 'SKU');
+      contextoLog.codigo = codigo;
+      contextoLog.modo = 'remover-reaplicar';
+      if (String(pedido.confirmacao || '').trim() !== codigo) throw new Error(`Digite exatamente o SKU ${codigo} para confirmar.`);
+      const idProduto = inteiro(plano.idProduto, 'Produto');
+      contextoLog.idProduto = idProduto;
+      contextoLog.etapa = 'reler-produto-antes-da-remocao';
+      const antes = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
+      if (!antes || hash(retratoParaSimulacaoDeImagens(antes)) !== plano.hashAtual) {
+        throw falhaApi('O produto mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.', 'SIMULACAO_DESATUALIZADA');
+      }
+      const linksAtuais = linksDasImagens(antes);
+      const quantidadeAntes = inteiro(plano.quantidadeAntes, 'Quantidade atual de imagens');
+      if (linksAtuais.length !== quantidadeAntes) {
+        throw falhaApi('A quantidade de imagens mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.', 'SIMULACAO_DESATUALIZADA');
+      }
+      const quantidadeDepois = inteiro(plano.quantidadeDepois, 'Quantidade final de imagens');
+      const linksNovos = validarNovasImagens(plano.linksNovos, quantidadeDepois);
+      contextoLog.etapa = 'montar-corpo-remocao';
+      const corpoSemImagens = corpoPutParaImagens(antes, []);
+      contextoLog.etapa = 'abrir-auditoria-remocao';
+      const auditoria = await iniciarAuditoria({
+        tipo: 'ALTERAR_IMAGENS_MARKETPLACE',
+        id_produto_bling: idProduto,
+        codigo,
+        antes: { imagens: linksAtuais },
+        solicitado: { etapa: 'REMOVER', imagens: [] },
+      });
+      let requisicaoEnviada = false;
+      try {
+        await pausa(500);
+        contextoLog.etapa = 'enviar-put-sem-imagens';
+        requisicaoEnviada = true;
+        await chamarBling(`/produtos/${idProduto}`, token, { method: 'PUT', body: JSON.stringify(corpoSemImagens) });
+        contextoLog.etapa = 'confirmar-produto-sem-imagens';
+        const { depois, linksConfirmados } = await conferirSubstituicaoDeImagens(idProduto, token, antes, 0);
+        if (linksConfirmados.length !== 0) throw new Error('O Bling não confirmou a remoção total das imagens.');
+        const expiraEm = Date.now() + 10 * 60 * 1000;
+        const planoAplicacao = {
+          versao: 1,
+          tipo: 'reposicao-imagens',
+          modo: 'apos-remocao-confirmada',
+          idProduto,
+          codigo,
+          linksNovos,
+          quantidadeAntes: 0,
+          quantidadeDepois,
+          hashAtual: hash(retratoParaSimulacaoDeImagens(depois)),
+          expiraEm,
+        };
+        contextoLog.etapa = 'concluir-auditoria-remocao';
+        await concluirAuditoria(auditoria, 'SUCESSO');
+        return Response.json({
+          removido: true,
+          quantidadeConfirmada: 0,
+          simulacaoAplicacao: assinar(planoAplicacao),
+          expiraEm,
+        });
+      } catch (erro) {
+        await concluirAuditoria(auditoria, requisicaoEnviada ? 'REVISAO' : 'FALHA', erro instanceof Error ? erro.message : 'Falha não identificada').catch(() => null);
+        throw erro;
+      }
+    }
+
     if (acao === 'aplicar-imagens') {
       contextoLog.etapa = 'validar-simulacao-imagens';
       const plano = conferirAssinatura(pedido.simulacao);
-      if (plano.tipo !== 'imagens-marketplace') throw new Error('Esta simulação não é de imagens para marketplace.');
+      if (plano.tipo !== 'reposicao-imagens' || plano.modo !== 'apos-remocao-confirmada') {
+        throw falhaApi(
+          'A aplicação permanece bloqueada até o Bling confirmar que o produto está sem imagens.',
+          'ALTERACAO_IMAGENS_BLOQUEADA',
+        );
+      }
       const codigo = texto(plano.codigo, 120, 'SKU');
       contextoLog.codigo = codigo;
       contextoLog.modo = String(plano.modo || 'substituir');
@@ -641,7 +730,8 @@ export async function POST(request: Request) {
         throw falhaApi('O produto mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.', 'SIMULACAO_DESATUALIZADA');
       }
       const linksAtuais = linksDasImagens(antes);
-      const quantidadeAntes = inteiro(plano.quantidadeAntes, 'Quantidade atual de imagens');
+      const quantidadeAntes = Number(plano.quantidadeAntes);
+      if (quantidadeAntes !== 0) throw falhaApi('A reposição segura exige produto sem imagens.', 'SIMULACAO_INVALIDA');
       const quantidadeDepois = inteiro(plano.quantidadeDepois, 'Quantidade final de imagens');
       if (linksAtuais.length !== quantidadeAntes) {
         throw falhaApi('A quantidade de imagens mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.', 'SIMULACAO_DESATUALIZADA');
