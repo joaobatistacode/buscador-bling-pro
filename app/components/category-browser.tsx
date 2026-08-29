@@ -71,6 +71,7 @@ async function jsonDaResposta(resposta: Response) {
 }
 
 const LADO_MARKETPLACE = 1200;
+const ALTERACAO_IMAGENS_BLING_BLOQUEADA = true;
 
 function linksDasImagens(produto: Record<string, unknown>) {
   const midia = produto.midia && typeof produto.midia === 'object' ? produto.midia as Record<string, unknown> : {};
@@ -393,6 +394,11 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
 
   const aplicarTrocaDeImagens = async () => {
     if (!produtoTeste || !simulacaoImagens) return;
+    if (ALTERACAO_IMAGENS_BLING_BLOQUEADA) {
+      setMensagemTeste('Envio bloqueado com segurança. Nenhuma imagem foi alterada no Bling.');
+      aoErro('A alteração de imagens está temporariamente bloqueada para impedir novas duplicações no Bling.');
+      return;
+    }
     if (simulacaoImagens.expiraEm <= Date.now()) {
       setSimulacaoImagens(undefined);
       setConfirmacaoSku('');
@@ -520,19 +526,14 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
             <button type="button" onClick={simularTrocaDeImagens} disabled={simulandoImagens || preparandoTeste} className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-black text-white disabled:opacity-40">{simulandoImagens ? 'Preparando simulação…' : 'Preparar simulação no Bling'}</button>
           </div>}
 
-          {simulacaoImagens && <div className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-4">
-            <p className="text-xs font-black uppercase tracking-wider text-rose-700">Última barreira antes da alteração real</p>
-            <p className="mt-2 text-sm font-semibold text-rose-950">{produtoTeste.modo === 'reparar-duplicacao'
-              ? <>O servidor substituirá as <strong>{produtoTeste.linksAtuais.length}</strong> imagens atuais pelas <strong>{produtoTeste.linksParaGerar.length}</strong> imagens finais exibidas acima e fará duas conferências estáveis no Bling. Digite <strong>{produtoTeste.codigo}</strong> para liberar somente este reparo.</>
-              : <>O servidor reconstruirá o produto a partir da leitura atual e substituirá somente o conjunto de imagens. Depois, fará duas conferências estáveis no Bling. Digite <strong>{produtoTeste.codigo}</strong> para liberar este único produto.</>}</p>
-            <details className="mt-3 rounded-xl border border-rose-100 bg-white p-3 text-xs text-slate-700">
+          {simulacaoImagens && <div className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 p-4">
+            <p className="text-xs font-black uppercase tracking-wider text-amber-800">Envio ao Bling temporariamente bloqueado</p>
+            <p className="mt-2 text-sm font-semibold text-amber-950">As imagens novas foram preparadas e podem ser conferidas abaixo, mas o sistema não as enviará ao Bling. Este bloqueio impede que as imagens atuais sejam mantidas e novas cópias sejam acrescentadas novamente.</p>
+            <details className="mt-3 rounded-xl border border-amber-200 bg-white p-3 text-xs text-slate-700">
               <summary className="cursor-pointer font-black">Ver conjunto exato de imagens novas</summary>
               <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(simulacaoImagens.corpoPatch, null, 2)}</pre>
             </details>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <input value={confirmacaoSku} onChange={evento => setConfirmacaoSku(evento.target.value)} className="min-w-[240px] flex-1 rounded-xl border border-rose-300 bg-white px-3 py-2.5 text-sm font-bold" placeholder={`Digite ${produtoTeste.codigo}`} />
-              <button type="button" onClick={aplicarTrocaDeImagens} disabled={aplicandoImagens || confirmacaoSku !== produtoTeste.codigo} className="rounded-xl bg-rose-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{aplicandoImagens ? 'Aplicando e conferindo…' : 'Aplicar em 1 produto'}</button>
-            </div>
+            <button type="button" onClick={aplicarTrocaDeImagens} disabled className="mt-4 rounded-xl bg-slate-400 px-4 py-2.5 text-sm font-black text-white opacity-70">Aplicação bloqueada</button>
           </div>}
         </div>}
       </section>}
