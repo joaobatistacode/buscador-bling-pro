@@ -32,7 +32,7 @@ type ImagemTesteMarketplace = {
   alturaOriginal: number;
 };
 
-type ModoImagens = 'substituir' | 'reparar-duplicacao';
+type ModoImagens = 'remover-reaplicar' | 'apos-remocao-confirmada';
 
 type ProdutoTesteMarketplace = {
   id: number;
@@ -45,9 +45,16 @@ type ProdutoTesteMarketplace = {
 
 type SimulacaoImagens = {
   simulacao: string;
+  simulacaoAplicacao?: string;
+  produtoSemImagens?: boolean;
   expiraEm: number;
   modo: ModoImagens;
   corpoPatch: { midia: { imagens: { imagensURL: Array<{ link: string }> } } };
+};
+
+type ReposicaoImagens = {
+  simulacao: string;
+  expiraEm: number;
 };
 
 type Props = {
@@ -71,7 +78,6 @@ async function jsonDaResposta(resposta: Response) {
 }
 
 const LADO_MARKETPLACE = 1200;
-const ALTERACAO_IMAGENS_BLING_BLOQUEADA = true;
 
 function linksDasImagens(produto: Record<string, unknown>) {
   const midia = produto.midia && typeof produto.midia === 'object' ? produto.midia as Record<string, unknown> : {};
@@ -100,26 +106,6 @@ function linksDasImagens(produto: Record<string, unknown>) {
   const principal = String(produto.imagemURL || '').trim();
   if (!links.length && /^https:\/\//i.test(principal)) links.push(principal);
   return links;
-}
-
-function ehCopiaMarketplaceProtegida(link: string) {
-  try {
-    return new URL(link).pathname.includes('-marketplace/');
-  } catch {
-    return false;
-  }
-}
-
-function prepararConjuntoDeImagens(linksAtuais: string[]) {
-  const originais = linksAtuais.filter(link => !ehCopiaMarketplaceProtegida(link));
-  const copiasMarketplace = linksAtuais.filter(ehCopiaMarketplaceProtegida);
-  const reparoDuplicacao = originais.length > 0
-    && originais.length === copiasMarketplace.length
-    && linksAtuais.length === originais.length * 2;
-  return {
-    modo: (reparoDuplicacao ? 'reparar-duplicacao' : 'substituir') as ModoImagens,
-    linksParaGerar: reparoDuplicacao ? originais : linksAtuais,
-  };
 }
 
 const carregarImagem = (blob: Blob) => new Promise<HTMLImageElement>((resolve, reject) => {
@@ -214,8 +200,10 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
   const [imagensTeste, setImagensTeste] = useState<ImagemTesteMarketplace[]>([]);
   const [preparandoTeste, setPreparandoTeste] = useState(false);
   const [simulandoImagens, setSimulandoImagens] = useState(false);
+  const [removendoImagens, setRemovendoImagens] = useState(false);
   const [aplicandoImagens, setAplicandoImagens] = useState(false);
   const [simulacaoImagens, setSimulacaoImagens] = useState<SimulacaoImagens>();
+  const [reposicaoImagens, setReposicaoImagens] = useState<ReposicaoImagens>();
   const [confirmacaoSku, setConfirmacaoSku] = useState('');
   const [mensagemTeste, setMensagemTeste] = useState('');
   const controladorConsulta = useRef<AbortController | undefined>(undefined);
@@ -304,30 +292,35 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
 
   const abrirTesteDeFotos = async (item: ProdutoCatalogo) => {
     setPreparandoTeste(true);
-    setMensagemTeste('Buscando as imagens atuais diretamente no Bling…');
+    setMensagemTeste('Conferindo o produto no Bling e buscando as imagens originais salvas no Supabase…');
     setSimulacaoImagens(undefined);
+    setReposicaoImagens(undefined);
     setConfirmacaoSku('');
     setProdutoTeste(undefined);
     setImagensTeste([]);
     aoErro('');
     try {
-      const dados = await jsonDaResposta(await fetch(`/api/bling/administracao?recurso=produto&id=${item.id}`));
-      const produto = dados.produto && typeof dados.produto === 'object' ? dados.produto as Record<string, unknown> : {};
-      const links = linksDasImagens(produto);
-      if (!links.length) throw new Error('O detalhe deste produto não devolveu nenhuma imagem no Bling.');
-      if (links.length > 10) throw new Error('Este produto possui mais de 10 imagens. O teste foi bloqueado para evitar perda de fotos.');
-      const { modo, linksParaGerar } = prepararConjuntoDeImagens(links);
+      const [dadosBling, dadosSupabase] = await Promise.all([
+        fetch(`/api/bling/administracao?recurso=produto&id=${item.id}`).then(jsonDaResposta),
+        fetch(`/api/bling/administracao?recurso=imagens-supabase&codigo=${encodeURIComponent(item.codigo)}`).then(jsonDaResposta),
+      ]);
+      const produto = dadosBling.produto && typeof dadosBling.produto === 'object' ? dadosBling.produto as Record<string, unknown> : {};
+      const linksAtuais = linksDasImagens(produto);
+      const imagensSalvas: unknown[] = Array.isArray(dadosSupabase.imagens) ? dadosSupabase.imagens : [];
+      const linksParaGerar: string[] = [...new Set(imagensSalvas
+        .map(link => String(link || '').trim())
+        .filter(link => /^https:\/\//i.test(link)))];
+      if (!linksParaGerar.length) throw new Error('Nenhuma imagem original foi encontrada no Supabase para este SKU.');
+      if (linksParaGerar.length > 10) throw new Error('O Supabase possui mais de 10 imagens para este produto. O teste foi bloqueado para revisão.');
       setProdutoTeste({
         id: item.id,
         codigo: String(produto.codigo || item.codigo),
         nome: String(produto.nome || item.nome),
-        linksAtuais: links,
+        linksAtuais,
         linksParaGerar,
-        modo,
+        modo: 'remover-reaplicar',
       });
-      setMensagemTeste(modo === 'reparar-duplicacao'
-        ? `${links.length} imagens encontradas: ${linksParaGerar.length} originais e ${links.length - linksParaGerar.length} cópias do teste anterior. Preparando somente o conjunto original…`
-        : `${links.length} imagem(ns) encontrada(s). Preparando cópias sem alterar o Bling…`);
+      setMensagemTeste(`${linksAtuais.length} imagem(ns) no Bling e ${linksParaGerar.length} original(is) no Supabase. Convertendo as imagens salvas para 1200×1200…`);
       const geradas: ImagemTesteMarketplace[] = [];
       for (let indice = 0; indice < linksParaGerar.length; indice++) {
         const resultado = await gerarCopiaMarketplace(linksParaGerar[indice]);
@@ -341,9 +334,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
         });
       }
       setImagensTeste(geradas);
-      setMensagemTeste(modo === 'reparar-duplicacao'
-        ? `Reparo preparado: a simulação reduzirá ${links.length} imagens para ${linksParaGerar.length}. Até aqui, nenhuma imagem do Bling foi alterada.`
-        : 'Cópias prontas. Até aqui, nenhuma imagem do Bling foi alterada.');
+      setMensagemTeste(`${geradas.length} imagem(ns) convertida(s) a partir do Supabase. Até aqui, nenhuma imagem do Bling foi alterada.`);
     } catch (erro) {
       const mensagem = erro instanceof Error ? erro.message : 'Não foi possível preparar o teste.';
       setMensagemTeste('');
@@ -381,9 +372,13 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
         }),
       })) as SimulacaoImagens;
       setSimulacaoImagens(simulacao);
-      setMensagemTeste(produtoTeste.modo === 'reparar-duplicacao'
-        ? `Simulação de reparo pronta: ${produtoTeste.linksAtuais.length} imagens atuais serão substituídas pelas ${urls.length} cópias conferidas abaixo.`
-        : 'Simulação pronta. Confira o conjunto final e digite o SKU somente se quiser testar neste produto real.');
+      if (simulacao.produtoSemImagens && simulacao.simulacaoAplicacao) {
+        setReposicaoImagens({ simulacao: simulacao.simulacaoAplicacao, expiraEm: simulacao.expiraEm });
+        setMensagemTeste(`O produto já está sem imagens. A etapa de remoção foi dispensada e as ${urls.length} imagens convertidas estão prontas para reaplicação segura.`);
+      } else {
+        setReposicaoImagens(undefined);
+        setMensagemTeste(`Simulação pronta: primeiro remover ${produtoTeste.linksAtuais.length} imagem(ns) do Bling e, somente após confirmar zero, aplicar as ${urls.length} imagens convertidas.`);
+      }
     } catch (erro) {
       setMensagemTeste('');
       aoErro(erro instanceof Error ? erro.message : 'Não foi possível simular a troca das imagens.');
@@ -392,18 +387,46 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
     }
   };
 
-  const aplicarTrocaDeImagens = async () => {
+  const removerImagensDoBling = async () => {
     if (!produtoTeste || !simulacaoImagens) return;
-    if (ALTERACAO_IMAGENS_BLING_BLOQUEADA) {
-      setMensagemTeste('Envio bloqueado com segurança. Nenhuma imagem foi alterada no Bling.');
-      aoErro('A alteração de imagens está temporariamente bloqueada para impedir novas duplicações no Bling.');
-      return;
-    }
     if (simulacaoImagens.expiraEm <= Date.now()) {
       setSimulacaoImagens(undefined);
       setConfirmacaoSku('');
-      setMensagemTeste('A simulação venceu e foi descartada com segurança. Prepare uma nova simulação antes de aplicar.');
+      setMensagemTeste('A simulação venceu. Prepare novamente o teste antes de remover qualquer imagem.');
       aoErro('A simulação expirou. Nenhuma alteração foi feita no Bling.');
+      return;
+    }
+    setRemovendoImagens(true);
+    setMensagemTeste('Solicitando a remoção e aguardando o Bling confirmar zero imagens…');
+    aoErro('');
+    try {
+      const retorno = await jsonDaResposta(await fetch('/api/bling/administracao', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acao: 'remover-imagens', simulacao: simulacaoImagens.simulacao, confirmacao: confirmacaoSku }),
+      }));
+      setReposicaoImagens({ simulacao: String(retorno.simulacaoAplicacao), expiraEm: Number(retorno.expiraEm) });
+      setMensagemTeste('Etapa 1 concluída: o Bling confirmou que o produto está com zero imagens. A aplicação das imagens convertidas foi liberada somente para este SKU.');
+    } catch (erro) {
+      const codigo = String((erro as FalhaResposta)?.codigo || '');
+      if (codigo.startsWith('SIMULACAO_')) {
+        setSimulacaoImagens(undefined);
+        setConfirmacaoSku('');
+      }
+      setReposicaoImagens(undefined);
+      aoErro(erro instanceof Error ? erro.message : 'O Bling não confirmou a remoção. A reaplicação continua bloqueada.');
+    } finally {
+      setRemovendoImagens(false);
+    }
+  };
+
+  const aplicarTrocaDeImagens = async () => {
+    if (!produtoTeste || !reposicaoImagens) return;
+    if (reposicaoImagens.expiraEm <= Date.now()) {
+      setReposicaoImagens(undefined);
+      setConfirmacaoSku('');
+      setMensagemTeste('A autorização para reaplicar venceu. O produto continua sem imagens; prepare novamente o teste antes de continuar.');
+      aoErro('A autorização de reaplicação expirou. Nenhuma imagem nova foi enviada.');
       return;
     }
     setAplicandoImagens(true);
@@ -413,21 +436,22 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
       const retorno = await jsonDaResposta(await fetch('/api/bling/administracao', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ acao: 'aplicar-imagens', simulacao: simulacaoImagens.simulacao, confirmacao: confirmacaoSku }),
+        body: JSON.stringify({ acao: 'aplicar-imagens', simulacao: reposicaoImagens.simulacao, confirmacao: confirmacaoSku }),
       }));
       setSimulacaoImagens(undefined);
+      setReposicaoImagens(undefined);
       setConfirmacaoSku('');
-      setMensagemTeste(`Teste concluído: o Bling confirmou ${retorno.quantidadeConfirmada} imagem(ns). Confira este produto nos canais antes de testar outro.`);
+      setMensagemTeste(`Teste completo aprovado: o Bling confirmou ${retorno.quantidadeConfirmada} imagem(ns) convertida(s). Confira visualmente o produto antes de liberar qualquer lote.`);
     } catch (erro) {
       const codigo = String((erro as FalhaResposta)?.codigo || '');
       if (codigo.startsWith('SIMULACAO_')) {
-        setSimulacaoImagens(undefined);
+        setReposicaoImagens(undefined);
         setConfirmacaoSku('');
-        setMensagemTeste('A simulação foi descartada com segurança. Prepare uma nova simulação para reler o produto no Bling.');
+        setMensagemTeste('A autorização de reaplicação foi descartada. O produto precisa ser relido antes de continuar.');
       } else {
         setMensagemTeste('');
       }
-      aoErro(erro instanceof Error ? erro.message : 'A conferência da troca falhou. Não teste outro produto até revisar este cadastro.');
+      aoErro(erro instanceof Error ? erro.message : 'A reaplicação falhou. Não teste outro produto até revisar este cadastro.');
     } finally {
       setAplicandoImagens(false);
     }
@@ -499,10 +523,13 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
           <div>
             <p className="text-[11px] font-black uppercase tracking-[.18em] text-violet-700">Teste controlado de imagens</p>
             <h3 className="mt-1 text-lg font-black text-slate-950">{produtoTeste ? `${produtoTeste.codigo} · ${produtoTeste.nome}` : 'Carregando produto do Bling…'}</h3>
-            <p className="mt-1 text-xs font-semibold text-slate-600">Um produto por vez · cópias 1200×1200 · originais preservados até a confirmação pelo SKU</p>
-            {produtoTeste?.modo === 'reparar-duplicacao' && <p className="mt-2 inline-flex rounded-full bg-amber-100 px-3 py-1 text-xs font-black text-amber-900">Reparo detectado: {produtoTeste.linksAtuais.length} atuais → {produtoTeste.linksParaGerar.length} finais</p>}
+            <p className="mt-1 text-xs font-semibold text-slate-600">Origem Supabase · JPEG 1200×1200 · remoção e reaplicação conferidas separadamente</p>
+            {produtoTeste && <p className="mt-2 inline-flex rounded-full bg-amber-100 px-3 py-1 text-xs font-black text-amber-900">{produtoTeste.linksAtuais.length} no Bling → zero → {produtoTeste.linksParaGerar.length} convertidas</p>}
           </div>
-          <button type="button" disabled={preparandoTeste || aplicandoImagens} onClick={() => { setProdutoTeste(undefined); setImagensTeste([]); setSimulacaoImagens(undefined); setMensagemTeste(''); }} className="rounded-xl border border-violet-200 bg-white px-3 py-2 text-xs font-black text-violet-800 disabled:opacity-40">Fechar teste</button>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" disabled className="rounded-xl bg-slate-300 px-3 py-2 text-xs font-black text-slate-600">Enviar lote de até 500 · bloqueado</button>
+            <button type="button" disabled={preparandoTeste || removendoImagens || aplicandoImagens} onClick={() => { setProdutoTeste(undefined); setImagensTeste([]); setSimulacaoImagens(undefined); setReposicaoImagens(undefined); setConfirmacaoSku(''); setMensagemTeste(''); }} className="rounded-xl border border-violet-200 bg-white px-3 py-2 text-xs font-black text-violet-800 disabled:opacity-40">Fechar teste</button>
+          </div>
         </div>
 
         {mensagemTeste && <div role="status" className="border-b border-blue-100 bg-blue-50 px-5 py-3 text-sm font-bold text-blue-800">{mensagemTeste}</div>}
@@ -520,21 +547,33 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
           </div>
 
           {!simulacaoImagens && <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
-            <p className="max-w-2xl text-sm font-semibold text-amber-950">{produtoTeste.modo === 'reparar-duplicacao'
-              ? `O sistema identificou ${produtoTeste.linksParaGerar.length} originais e ${produtoTeste.linksAtuais.length - produtoTeste.linksParaGerar.length} cópias protegidas do teste anterior. O próximo botão apenas monta a simulação para manter o conjunto original em 1200×1200.`
-              : 'O próximo botão apenas salva as cópias em uma pasta separada e monta a simulação. As fotos do produto no Bling ainda não serão trocadas.'}</p>
-            <button type="button" onClick={simularTrocaDeImagens} disabled={simulandoImagens || preparandoTeste} className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-black text-white disabled:opacity-40">{simulandoImagens ? 'Preparando simulação…' : 'Preparar simulação no Bling'}</button>
+            <p className="max-w-2xl text-sm font-semibold text-amber-950">O próximo botão salva as cópias convertidas numa pasta separada do Supabase e monta o teste. Nenhuma imagem do Bling será alterada nesta preparação.</p>
+            <button type="button" onClick={simularTrocaDeImagens} disabled={simulandoImagens || preparandoTeste} className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-black text-white disabled:opacity-40">{simulandoImagens ? 'Preparando teste…' : 'Preparar teste seguro'}</button>
           </div>}
 
-          {simulacaoImagens && <div className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 p-4">
-            <p className="text-xs font-black uppercase tracking-wider text-amber-800">Envio ao Bling temporariamente bloqueado</p>
-            <p className="mt-2 text-sm font-semibold text-amber-950">As imagens novas foram preparadas e podem ser conferidas abaixo, mas o sistema não as enviará ao Bling. Este bloqueio impede que as imagens atuais sejam mantidas e novas cópias sejam acrescentadas novamente.</p>
-            <details className="mt-3 rounded-xl border border-amber-200 bg-white p-3 text-xs text-slate-700">
+          {simulacaoImagens && !reposicaoImagens && <div className="mt-5 rounded-2xl border-2 border-rose-300 bg-rose-50 p-4">
+            <p className="text-xs font-black uppercase tracking-wider text-rose-800">Etapa 1 de 2 · remover todas as imagens</p>
+            <p className="mt-2 text-sm font-semibold text-rose-950">Esta ação enviará o produto sem imagens e aguardará o Bling confirmar <strong>zero imagens</strong>. Se o Bling mantiver qualquer foto, a etapa 2 continuará bloqueada. Digite <strong>{produtoTeste.codigo}</strong> para autorizar somente este produto.</p>
+            <details className="mt-3 rounded-xl border border-rose-200 bg-white p-3 text-xs text-slate-700">
               <summary className="cursor-pointer font-black">Ver conjunto exato de imagens novas</summary>
               <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(simulacaoImagens.corpoPatch, null, 2)}</pre>
             </details>
-            <button type="button" onClick={aplicarTrocaDeImagens} disabled className="mt-4 rounded-xl bg-slate-400 px-4 py-2.5 text-sm font-black text-white opacity-70">Aplicação bloqueada</button>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <input value={confirmacaoSku} onChange={evento => setConfirmacaoSku(evento.target.value)} className="min-w-[240px] flex-1 rounded-xl border border-rose-300 bg-white px-3 py-2.5 text-sm font-bold" placeholder={`Digite ${produtoTeste.codigo}`} />
+              <button type="button" onClick={removerImagensDoBling} disabled={removendoImagens || confirmacaoSku !== produtoTeste.codigo} className="rounded-xl bg-rose-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{removendoImagens ? 'Removendo e conferindo…' : '1. Remover todas as imagens'}</button>
+            </div>
           </div>}
+
+          {reposicaoImagens && <div className="mt-5 rounded-2xl border-2 border-emerald-300 bg-emerald-50 p-4">
+            <p className="text-xs font-black uppercase tracking-wider text-emerald-800">Etapa 2 de 2 · produto confirmado sem imagens</p>
+            <p className="mt-2 text-sm font-semibold text-emerald-950">O Bling confirmou zero imagens. Agora o servidor aceitará somente as <strong>{produtoTeste.linksParaGerar.length}</strong> cópias 1200×1200 preparadas acima e fará uma nova conferência antes de aprovar o teste.</p>
+            <button type="button" onClick={aplicarTrocaDeImagens} disabled={aplicandoImagens || confirmacaoSku !== produtoTeste.codigo} className="mt-4 rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{aplicandoImagens ? 'Aplicando e conferindo…' : '2. Aplicar todas as imagens novas'}</button>
+          </div>}
+
+          <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <p className="text-xs font-black uppercase tracking-wider text-slate-600">Processamento em lote</p>
+            <p className="mt-2 text-sm font-semibold text-slate-700">A fila de até 500 produtos continuará bloqueada até este teste completar as duas etapas e a conferência visual ser aprovada.</p>
+          </div>
         </div>}
       </section>}
 
@@ -560,7 +599,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
                 <td className="px-4 py-3 font-bold">{diagnostico ? diagnostico.saldoFisico.toLocaleString('pt-BR') : aguardandoDiagnostico}</td>
                 <td className="px-4 py-3">{diagnostico ? (diagnostico.quantidadeImagens ? <span className="font-bold text-emerald-700">Sim</span> : <span className="font-bold text-rose-700">Não</span>) : aguardandoDiagnostico}</td>
                 <td className="px-4 py-3">{diagnostico ? (diagnostico.canalConferido ? diagnostico.quantidadeCanais : <span className="font-bold text-amber-700">Não verificado</span>) : aguardandoDiagnostico}</td>
-                <td className="px-5 py-3 text-right"><div className="flex justify-end gap-2"><button type="button" onClick={() => void abrirTesteDeFotos(item)} disabled={preparandoTeste || aplicandoImagens} className="rounded-lg bg-violet-100 px-3 py-2 text-xs font-black text-violet-800 disabled:opacity-40">Testar fotos</button><button type="button" onClick={() => aoAbrir(item)} className="rounded-lg bg-[#071a24] px-3 py-2 text-xs font-black text-white">Abrir editor</button></div></td>
+                <td className="px-5 py-3 text-right"><div className="flex justify-end gap-2"><button type="button" onClick={() => void abrirTesteDeFotos(item)} disabled={preparandoTeste || removendoImagens || aplicandoImagens} className="rounded-lg bg-violet-100 px-3 py-2 text-xs font-black text-violet-800 disabled:opacity-40">Testar fotos</button><button type="button" onClick={() => aoAbrir(item)} className="rounded-lg bg-[#071a24] px-3 py-2 text-xs font-black text-white">Abrir editor</button></div></td>
               </tr>;
             })}</tbody>
           </table>
