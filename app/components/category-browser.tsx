@@ -305,6 +305,10 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
       const codigoProduto = String(produto.codigo || item.codigo).trim();
       const dadosSupabase = await fetch(`/api/bling/administracao?recurso=imagens-supabase&codigo=${encodeURIComponent(codigoProduto)}`).then(jsonDaResposta);
       const linksAtuais = linksDasImagens(produto);
+      const copias1200: unknown[] = Array.isArray(dadosSupabase.imagensMarketplace) ? dadosSupabase.imagensMarketplace : [];
+      const links1200Existentes = [...new Set(copias1200
+        .map(link => String(link || '').trim())
+        .filter(link => /^https:\/\//i.test(link)))];
       const imagensSalvas: unknown[] = Array.isArray(dadosSupabase.imagens) ? dadosSupabase.imagens : [];
       const linksParaGerar: string[] = [...new Set(imagensSalvas
         .map(link => String(link || '').trim())
@@ -319,6 +323,10 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
         linksParaGerar,
         modo: 'remover-reaplicar',
       });
+      if (links1200Existentes.length) {
+        setMensagemTeste(`${links1200Existentes.length} cópia(s) 1200×1200 já existem no Supabase para este SKU. O novo envio foi bloqueado para não duplicá-las novamente no Bling.`);
+        return;
+      }
       setMensagemTeste(`${linksAtuais.length} imagem(ns) no Bling e ${linksParaGerar.length} original(is) no Supabase. Convertendo as imagens salvas para 1200×1200…`);
       const geradas: ImagemTesteMarketplace[] = [];
       for (let indice = 0; indice < linksParaGerar.length; indice++) {
