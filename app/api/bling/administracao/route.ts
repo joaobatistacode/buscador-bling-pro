@@ -345,14 +345,12 @@ function retratoParaSimulacaoDeImagens(produto: Objeto) {
 }
 
 function corpoPutParaImagens(produto: Objeto, linksNovos: string[]) {
-  if (String(produto.formato || '').toUpperCase() !== 'S') {
-    throw new Error('A substituição automática de imagens está liberada somente para produto simples, sem variações ou composição.');
-  }
-  const possuiEstrutura = produto.estrutura && typeof produto.estrutura === 'object'
-    ? Object.keys(produto.estrutura as Objeto).length > 0
-    : Boolean(produto.estrutura);
-  if ((Array.isArray(produto.variacoes) && produto.variacoes.length > 0) || possuiEstrutura) {
-    throw new Error('Produto com variações ou estrutura detectado. Nenhuma imagem foi alterada.');
+  const formato = String(produto.formato || '').toUpperCase();
+  if (formato !== 'S') {
+    throw falhaApi(
+      'A substituição automática de imagens está liberada somente para produto simples, sem variações ou composição.',
+      'PRODUTO_NAO_SIMPLES',
+    );
   }
   const corpo: Objeto = {};
   for (const campo of CAMPOS_PUT_PRODUTO) {
@@ -562,25 +560,39 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   if (!(await temAcesso())) return naoAutorizado();
   if (!origemPermitida(request)) return origemInvalida();
+  const contextoLog: {
+    acao: string;
+    etapa: string;
+    idProduto?: number;
+    codigo?: string;
+    modo?: string;
+  } = { acao: 'desconhecida', etapa: 'ler-pedido' };
   try {
     const bruto = await lerCorpoLimitado(request, 256 * 1024);
     const pedido = JSON.parse(new TextDecoder().decode(bruto)) as Objeto;
     const acao = String(pedido.acao || '');
+    contextoLog.acao = acao || 'desconhecida';
+    contextoLog.etapa = 'obter-token-bling';
     const token = await tokenDaSessao();
 
     if (acao === 'simular-imagens') {
       const idProduto = inteiro(pedido.idProduto, 'Produto');
+      contextoLog.idProduto = idProduto;
+      contextoLog.etapa = 'consultar-produto-para-simulacao';
       const atual = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
       if (!atual) throw new Error('O Bling não devolveu o produto.');
       const linksAtuais = linksDasImagens(atual);
       if (!linksAtuais.length) throw new Error('O produto não possui imagens no Bling.');
       const reparoDuplicacao = pedido.modo === 'reparar-duplicacao';
+      contextoLog.modo = reparoDuplicacao ? 'reparar-duplicacao' : 'substituir';
       const quantidadeNova = Array.isArray(pedido.urls) ? pedido.urls.length : 0;
       if (reparoDuplicacao && linksAtuais.length !== quantidadeNova * 2) {
         throw new Error(`O reparo exige exatamente o dobro de imagens atuais. O Bling devolveu ${linksAtuais.length} e o reparo contém ${quantidadeNova}.`);
       }
       const linksNovos = validarNovasImagens(pedido.urls, reparoDuplicacao ? quantidadeNova : linksAtuais.length);
       const codigo = texto(atual.codigo, 120, 'SKU do produto');
+      contextoLog.codigo = codigo;
+      contextoLog.etapa = 'assinar-simulacao-imagens';
       const planoImagens = { midia: { imagens: { imagensURL: linksNovos.map(link => ({ link })) } } };
       const plano = {
         versao: 1,
@@ -598,6 +610,7 @@ export async function POST(request: Request) {
       return Response.json({
         simulacao: assinar(plano),
         expiraEm: plano.expiraEm,
+        modo: plano.modo,
         produto: { id: idProduto, codigo, nome: atual.nome },
         antes: { imagens: linksAtuais },
         depois: { imagens: linksNovos },
@@ -606,11 +619,16 @@ export async function POST(request: Request) {
     }
 
     if (acao === 'aplicar-imagens') {
+      contextoLog.etapa = 'validar-simulacao-imagens';
       const plano = conferirAssinatura(pedido.simulacao);
       if (plano.tipo !== 'imagens-marketplace') throw new Error('Esta simulação não é de imagens para marketplace.');
       const codigo = texto(plano.codigo, 120, 'SKU');
+      contextoLog.codigo = codigo;
+      contextoLog.modo = String(plano.modo || 'substituir');
       if (String(pedido.confirmacao || '').trim() !== codigo) throw new Error(`Digite exatamente o SKU ${codigo} para confirmar.`);
       const idProduto = inteiro(plano.idProduto, 'Produto');
+      contextoLog.idProduto = idProduto;
+      contextoLog.etapa = 'reler-produto-antes-do-put';
       const antes = (await chamarBling(`/produtos/${idProduto}`, token))?.data as Objeto;
       if (!antes || hash(retratoParaSimulacaoDeImagens(antes)) !== plano.hashAtual) {
         throw falhaApi('O produto mudou depois da simulação. Nenhuma alteração foi feita; simule novamente.', 'SIMULACAO_DESATUALIZADA');
@@ -623,7 +641,9 @@ export async function POST(request: Request) {
       }
       const linksNovos = validarNovasImagens(plano.linksNovos, quantidadeDepois);
       const planoImagens = { midia: { imagens: { imagensURL: linksNovos.map(link => ({ link })) } } };
+      contextoLog.etapa = 'montar-corpo-put';
       const corpoPut = corpoPutParaImagens(antes, linksNovos);
+      contextoLog.etapa = 'abrir-auditoria';
       const auditoria = await iniciarAuditoria({
         tipo: 'ALTERAR_IMAGENS_MARKETPLACE',
         id_produto_bling: idProduto,
@@ -634,15 +654,18 @@ export async function POST(request: Request) {
       let requisicaoEnviada = false;
       try {
         await pausa(500);
+        contextoLog.etapa = 'enviar-put-bling';
         requisicaoEnviada = true;
         await chamarBling(`/produtos/${idProduto}`, token, { method: 'PUT', body: JSON.stringify(corpoPut) });
 
+        contextoLog.etapa = 'conferir-substituicao';
         const { depois, linksConfirmados } = await conferirSubstituicaoDeImagens(
           idProduto,
           token,
           antes,
           quantidadeDepois,
         );
+        contextoLog.etapa = 'concluir-auditoria';
         await concluirAuditoria(auditoria, 'SUCESSO');
         return Response.json({
           aplicado: true,
@@ -787,6 +810,12 @@ export async function POST(request: Request) {
 
     return Response.json({ erro: 'Operação desconhecida.' }, { status: 400 });
   } catch (erro) {
+    console.error('[bling/administracao] POST falhou', {
+      ...contextoLog,
+      codigoErro: String((erro as FalhaApi)?.codigo || ''),
+      statusBling: Number((erro as FalhaApi)?.status) || undefined,
+      mensagem: erro instanceof Error ? erro.message : 'Falha não identificada',
+    });
     return respostaErro(erro);
   }
 }
