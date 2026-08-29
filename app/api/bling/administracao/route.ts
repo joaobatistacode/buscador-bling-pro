@@ -99,6 +99,37 @@ function linksDoHistorico(valor: unknown): string[] {
   return [...new Set(encontrados)];
 }
 
+async function imagensDoStorage(codigo: string) {
+  const base = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const chave = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '');
+  if (!base || !chave) throw new Error('Supabase não configurado na Vercel.');
+  const skuSeguro = (codigo.replace(/[^a-zA-Z0-9._-]/g, '-') || 'produto').slice(0, 80);
+  const listar = async (prefixo: string) => {
+    const resposta = await fetch(`${base}/storage/v1/object/list/produtos-bling`, {
+      method: 'POST',
+      headers: {
+        apikey: chave,
+        Authorization: `Bearer ${chave}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ prefix: prefixo, limit: 100, offset: 0, sortBy: { column: 'name', order: 'asc' } }),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(12_000),
+    });
+    const objetos = await resposta.json().catch(() => []);
+    if (!resposta.ok) throw new Error(String(objetos?.message || `Supabase Storage HTTP ${resposta.status}`));
+    return (Array.isArray(objetos) ? objetos : [])
+      .map(item => String((item as Objeto)?.name || '').trim())
+      .filter(nome => /\.(?:jpe?g|png)$/i.test(nome))
+      .map(nome => `${base}/storage/v1/object/public/produtos-bling/${prefixo}${encodeURIComponent(nome)}`);
+  };
+  const [originais, marketplace] = await Promise.all([
+    listar(`${skuSeguro}/`),
+    listar(`${skuSeguro}-marketplace/`),
+  ]);
+  return { originais, marketplace };
+}
+
 function ordenar(valor: unknown): unknown {
   if (Array.isArray(valor)) return valor.map(ordenar);
   if (!valor || typeof valor !== 'object') return valor;
@@ -563,10 +594,17 @@ export async function GET(request: Request) {
         historico?.img3,
         historico?.img4,
       ]);
-      if (!imagens.length) {
+      const storage = await imagensDoStorage(codigo);
+      const originais = imagens.length ? imagens : storage.originais;
+      if (!originais.length && !storage.marketplace.length) {
         throw falhaApi('Nenhuma imagem salva no Supabase foi encontrada para este SKU.', 'IMAGENS_SUPABASE_AUSENTES');
       }
-      return Response.json({ produto: { codigo: historico.codigo, nome: historico.nome }, imagens });
+      return Response.json({
+        produto: { codigo: historico?.codigo || codigo, nome: historico?.nome || '' },
+        imagens: originais,
+        imagensMarketplace: storage.marketplace,
+        origem: imagens.length ? 'HISTORICO' : 'STORAGE',
+      });
     }
 
     if (recurso === 'campos') {
