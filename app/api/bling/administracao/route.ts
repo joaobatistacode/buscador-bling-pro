@@ -70,6 +70,29 @@ function texto(valor: unknown, limite: number, nome: string) {
   return limpo;
 }
 
+function linksDoHistorico(valor: unknown): string[] {
+  const encontrados: string[] = [];
+  const visitar = (entrada: unknown) => {
+    if (Array.isArray(entrada)) { entrada.forEach(visitar); return; }
+    if (typeof entrada === 'string') {
+      const textoEntrada = entrada.trim();
+      if (!textoEntrada) return;
+      try {
+        const convertido: unknown = JSON.parse(textoEntrada);
+        if (convertido !== entrada) { visitar(convertido); return; }
+      } catch { /* URL legada armazenada diretamente. */ }
+      if (/^https:\/\//i.test(textoEntrada)) encontrados.push(textoEntrada);
+      return;
+    }
+    if (entrada && typeof entrada === 'object') {
+      const objeto = entrada as Objeto;
+      visitar(objeto.url ?? objeto.link ?? objeto.imagem ?? objeto.imagemURL);
+    }
+  };
+  visitar(valor);
+  return [...new Set(encontrados)];
+}
+
 function ordenar(valor: unknown): unknown {
   if (Array.isArray(valor)) return valor.map(ordenar);
   if (!valor || typeof valor !== 'object') return valor;
@@ -524,12 +547,16 @@ export async function GET(request: Request) {
     if (recurso === 'imagens-supabase') {
       const codigo = texto(url.searchParams.get('codigo'), 120, 'SKU');
       const [historico] = await supabaseRest(
-        `bling_produtos?codigo=eq.${encodeURIComponent(codigo)}&select=codigo,nome,imagens&limit=1`,
+        `bling_produtos?codigo=eq.${encodeURIComponent(codigo)}&select=*&limit=1`,
         { method: 'GET' },
-      ) as Array<{ codigo?: string; nome?: string; imagens?: unknown }>;
-      const imagens = (Array.isArray(historico?.imagens) ? historico.imagens : [])
-        .map(item => String(item || '').trim())
-        .filter(link => /^https:\/\//i.test(link));
+      ) as Array<Objeto>;
+      const imagens = linksDoHistorico([
+        historico?.imagens,
+        historico?.img1,
+        historico?.img2,
+        historico?.img3,
+        historico?.img4,
+      ]);
       if (!imagens.length) {
         throw falhaApi('Nenhuma imagem salva no Supabase foi encontrada para este SKU.', 'IMAGENS_SUPABASE_AUSENTES');
       }
