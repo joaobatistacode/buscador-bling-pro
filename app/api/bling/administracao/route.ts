@@ -572,6 +572,13 @@ export async function POST(request: Request) {
     const pedido = JSON.parse(new TextDecoder().decode(bruto)) as Objeto;
     const acao = String(pedido.acao || '');
     contextoLog.acao = acao || 'desconhecida';
+    if (acao === 'aplicar-imagens') {
+      contextoLog.etapa = 'bloqueio-emergencial-imagens';
+      throw falhaApi(
+        'O envio de imagens ao Bling está temporariamente bloqueado para impedir novas duplicações. A simulação continua disponível, mas nenhuma imagem será alterada.',
+        'ALTERACAO_IMAGENS_BLOQUEADA',
+      );
+    }
     contextoLog.etapa = 'obter-token-bling';
     const token = await tokenDaSessao();
 
