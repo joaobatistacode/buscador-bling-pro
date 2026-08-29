@@ -32,16 +32,21 @@ type ImagemTesteMarketplace = {
   alturaOriginal: number;
 };
 
+type ModoImagens = 'substituir' | 'reparar-duplicacao';
+
 type ProdutoTesteMarketplace = {
   id: number;
   codigo: string;
   nome: string;
-  links: string[];
+  linksAtuais: string[];
+  linksParaGerar: string[];
+  modo: ModoImagens;
 };
 
 type SimulacaoImagens = {
   simulacao: string;
   expiraEm: number;
+  modo: ModoImagens;
   corpoPatch: { midia: { imagens: { imagensURL: Array<{ link: string }> } } };
 };
 
@@ -94,6 +99,26 @@ function linksDasImagens(produto: Record<string, unknown>) {
   const principal = String(produto.imagemURL || '').trim();
   if (!links.length && /^https:\/\//i.test(principal)) links.push(principal);
   return links;
+}
+
+function ehCopiaMarketplaceProtegida(link: string) {
+  try {
+    return new URL(link).pathname.includes('-marketplace/');
+  } catch {
+    return false;
+  }
+}
+
+function prepararConjuntoDeImagens(linksAtuais: string[]) {
+  const originais = linksAtuais.filter(link => !ehCopiaMarketplaceProtegida(link));
+  const copiasMarketplace = linksAtuais.filter(ehCopiaMarketplaceProtegida);
+  const reparoDuplicacao = originais.length > 0
+    && originais.length === copiasMarketplace.length
+    && linksAtuais.length === originais.length * 2;
+  return {
+    modo: (reparoDuplicacao ? 'reparar-duplicacao' : 'substituir') as ModoImagens,
+    linksParaGerar: reparoDuplicacao ? originais : linksAtuais,
+  };
 }
 
 const carregarImagem = (blob: Blob) => new Promise<HTMLImageElement>((resolve, reject) => {
@@ -290,14 +315,24 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
       const links = linksDasImagens(produto);
       if (!links.length) throw new Error('O detalhe deste produto não devolveu nenhuma imagem no Bling.');
       if (links.length > 10) throw new Error('Este produto possui mais de 10 imagens. O teste foi bloqueado para evitar perda de fotos.');
-      setProdutoTeste({ id: item.id, codigo: String(produto.codigo || item.codigo), nome: String(produto.nome || item.nome), links });
-      setMensagemTeste(`${links.length} imagem(ns) encontrada(s). Preparando cópias sem alterar o Bling…`);
+      const { modo, linksParaGerar } = prepararConjuntoDeImagens(links);
+      setProdutoTeste({
+        id: item.id,
+        codigo: String(produto.codigo || item.codigo),
+        nome: String(produto.nome || item.nome),
+        linksAtuais: links,
+        linksParaGerar,
+        modo,
+      });
+      setMensagemTeste(modo === 'reparar-duplicacao'
+        ? `${links.length} imagens encontradas: ${linksParaGerar.length} originais e ${links.length - linksParaGerar.length} cópias do teste anterior. Preparando somente o conjunto original…`
+        : `${links.length} imagem(ns) encontrada(s). Preparando cópias sem alterar o Bling…`);
       const geradas: ImagemTesteMarketplace[] = [];
-      for (let indice = 0; indice < links.length; indice++) {
-        const resultado = await gerarCopiaMarketplace(links[indice]);
+      for (let indice = 0; indice < linksParaGerar.length; indice++) {
+        const resultado = await gerarCopiaMarketplace(linksParaGerar[indice]);
         geradas.push({
           indice,
-          urlOriginal: links[indice],
+          urlOriginal: linksParaGerar[indice],
           urlPrevia: URL.createObjectURL(resultado.blob),
           blob: resultado.blob,
           larguraOriginal: resultado.larguraOriginal,
@@ -305,7 +340,9 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
         });
       }
       setImagensTeste(geradas);
-      setMensagemTeste('Cópias prontas. Até aqui, nenhuma imagem do Bling foi alterada.');
+      setMensagemTeste(modo === 'reparar-duplicacao'
+        ? `Reparo preparado: a simulação reduzirá ${links.length} imagens para ${linksParaGerar.length}. Até aqui, nenhuma imagem do Bling foi alterada.`
+        : 'Cópias prontas. Até aqui, nenhuma imagem do Bling foi alterada.');
     } catch (erro) {
       const mensagem = erro instanceof Error ? erro.message : 'Não foi possível preparar o teste.';
       setMensagemTeste('');
@@ -316,7 +353,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
   };
 
   const simularTrocaDeImagens = async () => {
-    if (!produtoTeste || imagensTeste.length !== produtoTeste.links.length) return;
+    if (!produtoTeste || imagensTeste.length !== produtoTeste.linksParaGerar.length) return;
     setSimulandoImagens(true);
     setMensagemTeste('Salvando as cópias em uma pasta separada e preparando a simulação…');
     aoErro('');
@@ -335,10 +372,17 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
       const simulacao = await jsonDaResposta(await fetch('/api/bling/administracao', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ acao: 'simular-imagens', idProduto: produtoTeste.id, urls }),
+        body: JSON.stringify({
+          acao: 'simular-imagens',
+          idProduto: produtoTeste.id,
+          modo: produtoTeste.modo,
+          urls,
+        }),
       })) as SimulacaoImagens;
       setSimulacaoImagens(simulacao);
-      setMensagemTeste('Simulação pronta. Confira o corpo do PATCH e digite o SKU somente se quiser testar neste produto real.');
+      setMensagemTeste(produtoTeste.modo === 'reparar-duplicacao'
+        ? `Simulação de reparo pronta: ${produtoTeste.linksAtuais.length} imagens atuais serão substituídas pelas ${urls.length} cópias conferidas abaixo.`
+        : 'Simulação pronta. Confira o conjunto final e digite o SKU somente se quiser testar neste produto real.');
     } catch (erro) {
       setMensagemTeste('');
       aoErro(erro instanceof Error ? erro.message : 'Não foi possível simular a troca das imagens.');
@@ -450,6 +494,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
             <p className="text-[11px] font-black uppercase tracking-[.18em] text-violet-700">Teste controlado de imagens</p>
             <h3 className="mt-1 text-lg font-black text-slate-950">{produtoTeste ? `${produtoTeste.codigo} · ${produtoTeste.nome}` : 'Carregando produto do Bling…'}</h3>
             <p className="mt-1 text-xs font-semibold text-slate-600">Um produto por vez · cópias 1200×1200 · originais preservados até a confirmação pelo SKU</p>
+            {produtoTeste?.modo === 'reparar-duplicacao' && <p className="mt-2 inline-flex rounded-full bg-amber-100 px-3 py-1 text-xs font-black text-amber-900">Reparo detectado: {produtoTeste.linksAtuais.length} atuais → {produtoTeste.linksParaGerar.length} finais</p>}
           </div>
           <button type="button" disabled={preparandoTeste || aplicandoImagens} onClick={() => { setProdutoTeste(undefined); setImagensTeste([]); setSimulacaoImagens(undefined); setMensagemTeste(''); }} className="rounded-xl border border-violet-200 bg-white px-3 py-2 text-xs font-black text-violet-800 disabled:opacity-40">Fechar teste</button>
         </div>
@@ -461,7 +506,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={imagem.urlPrevia} alt={`Cópia ${imagem.indice + 1} de ${produtoTeste.nome}`} className="aspect-square w-full bg-white object-contain" />
               <div className="space-y-1 p-3 text-xs text-slate-600">
-                <p className="font-black text-slate-900">Imagem {imagem.indice + 1}</p>
+                <p className="font-black text-slate-900">Imagem final {imagem.indice + 1}</p>
                 <p>Original: {imagem.larguraOriginal}×{imagem.alturaOriginal}</p>
                 <p>Nova: 1200×1200 · {tamanhoArquivo(imagem.blob.size)}</p>
               </div>
@@ -469,13 +514,17 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
           </div>
 
           {!simulacaoImagens && <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
-            <p className="max-w-2xl text-sm font-semibold text-amber-950">O próximo botão apenas salva as cópias em uma pasta separada e monta a simulação. As fotos do produto no Bling ainda não serão trocadas.</p>
+            <p className="max-w-2xl text-sm font-semibold text-amber-950">{produtoTeste.modo === 'reparar-duplicacao'
+              ? `O sistema identificou ${produtoTeste.linksParaGerar.length} originais e ${produtoTeste.linksAtuais.length - produtoTeste.linksParaGerar.length} cópias protegidas do teste anterior. O próximo botão apenas monta a simulação para manter o conjunto original em 1200×1200.`
+              : 'O próximo botão apenas salva as cópias em uma pasta separada e monta a simulação. As fotos do produto no Bling ainda não serão trocadas.'}</p>
             <button type="button" onClick={simularTrocaDeImagens} disabled={simulandoImagens || preparandoTeste} className="rounded-xl bg-violet-700 px-4 py-3 text-sm font-black text-white disabled:opacity-40">{simulandoImagens ? 'Preparando simulação…' : 'Preparar simulação no Bling'}</button>
           </div>}
 
           {simulacaoImagens && <div className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-4">
             <p className="text-xs font-black uppercase tracking-wider text-rose-700">Última barreira antes da alteração real</p>
-            <p className="mt-2 text-sm font-semibold text-rose-950">O servidor reconstruirá o produto a partir da leitura atual e substituirá somente o conjunto de imagens. Depois, fará duas conferências estáveis no Bling. Digite <strong>{produtoTeste.codigo}</strong> para liberar este único produto.</p>
+            <p className="mt-2 text-sm font-semibold text-rose-950">{produtoTeste.modo === 'reparar-duplicacao'
+              ? <>O servidor substituirá as <strong>{produtoTeste.linksAtuais.length}</strong> imagens atuais pelas <strong>{produtoTeste.linksParaGerar.length}</strong> imagens finais exibidas acima e fará duas conferências estáveis no Bling. Digite <strong>{produtoTeste.codigo}</strong> para liberar somente este reparo.</>
+              : <>O servidor reconstruirá o produto a partir da leitura atual e substituirá somente o conjunto de imagens. Depois, fará duas conferências estáveis no Bling. Digite <strong>{produtoTeste.codigo}</strong> para liberar este único produto.</>}</p>
             <details className="mt-3 rounded-xl border border-rose-100 bg-white p-3 text-xs text-slate-700">
               <summary className="cursor-pointer font-black">Ver conjunto exato de imagens novas</summary>
               <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(simulacaoImagens.corpoPatch, null, 2)}</pre>
