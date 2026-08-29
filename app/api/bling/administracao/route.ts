@@ -72,7 +72,8 @@ function texto(valor: unknown, limite: number, nome: string) {
 
 function linksDoHistorico(valor: unknown): string[] {
   const encontrados: string[] = [];
-  const visitar = (entrada: unknown) => {
+  const visitar = (entrada: unknown, profundidade = 0) => {
+    if (profundidade > 5) return;
     if (Array.isArray(entrada)) { entrada.forEach(visitar); return; }
     if (typeof entrada === 'string') {
       const textoEntrada = entrada.trim();
@@ -86,7 +87,12 @@ function linksDoHistorico(valor: unknown): string[] {
     }
     if (entrada && typeof entrada === 'object') {
       const objeto = entrada as Objeto;
-      visitar(objeto.url ?? objeto.link ?? objeto.imagem ?? objeto.imagemURL);
+      const camposPreferidos = ['url', 'link', 'imagem', 'imagemURL', 'urlOriginal', 'linkOriginal', 'urlImagem', 'linkMiniatura'];
+      let encontrouCampo = false;
+      for (const campo of camposPreferidos) {
+        if (objeto[campo] !== undefined) { encontrouCampo = true; visitar(objeto[campo], profundidade + 1); }
+      }
+      if (!encontrouCampo) Object.values(objeto).forEach(item => visitar(item, profundidade + 1));
     }
   };
   visitar(valor);
