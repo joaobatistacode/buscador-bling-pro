@@ -300,11 +300,10 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
     setImagensTeste([]);
     aoErro('');
     try {
-      const [dadosBling, dadosSupabase] = await Promise.all([
-        fetch(`/api/bling/administracao?recurso=produto&id=${item.id}`).then(jsonDaResposta),
-        fetch(`/api/bling/administracao?recurso=imagens-supabase&codigo=${encodeURIComponent(item.codigo)}`).then(jsonDaResposta),
-      ]);
+      const dadosBling = await fetch(`/api/bling/administracao?recurso=produto&id=${item.id}`).then(jsonDaResposta);
       const produto = dadosBling.produto && typeof dadosBling.produto === 'object' ? dadosBling.produto as Record<string, unknown> : {};
+      const codigoProduto = String(produto.codigo || item.codigo).trim();
+      const dadosSupabase = await fetch(`/api/bling/administracao?recurso=imagens-supabase&codigo=${encodeURIComponent(codigoProduto)}`).then(jsonDaResposta);
       const linksAtuais = linksDasImagens(produto);
       const imagensSalvas: unknown[] = Array.isArray(dadosSupabase.imagens) ? dadosSupabase.imagens : [];
       const linksParaGerar: string[] = [...new Set(imagensSalvas
@@ -314,7 +313,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
       if (linksParaGerar.length > 10) throw new Error('O Supabase possui mais de 10 imagens para este produto. O teste foi bloqueado para revisão.');
       setProdutoTeste({
         id: item.id,
-        codigo: String(produto.codigo || item.codigo),
+        codigo: codigoProduto,
         nome: String(produto.nome || item.nome),
         linksAtuais,
         linksParaGerar,
