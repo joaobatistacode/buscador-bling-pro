@@ -24,6 +24,9 @@ const CAMPOS_PUT_PRODUTO = [
 
 const pausa = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const INTERVALO_LEITURA_BLING_MS = 500;
+const TIMEOUT_LEITURA_BLING_MS = 25_000;
+const TIMEOUT_MUTACAO_BLING_MS = 60_000;
+const STATUS_TRANSITORIOS_BLING = new Set([408, 425, 429, 500, 502, 503, 504]);
 let filaLeiturasBling = Promise.resolve();
 let ultimaLeituraBling = 0;
 
@@ -176,36 +179,56 @@ async function chamarBling(caminho: string, token: string, init: RequestInit = {
   const somenteLeitura = metodo === 'GET';
   const maximoTentativas = somenteLeitura ? 4 : 1;
   for (let tentativa = 0; tentativa < maximoTentativas; tentativa++) {
-    if (somenteLeitura) await aguardarJanelaDeLeitura(init.signal);
-    const timeout = AbortSignal.timeout(20_000);
-    const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
-    const resposta = await fetch(`${BLING_API}${caminho}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...(init.headers || {}),
-      },
-      cache: 'no-store',
-      signal,
-    });
-    const corpo = await resposta.json().catch(() => null);
-    if (resposta.ok) return corpo;
-    if (somenteLeitura && resposta.status === 429 && tentativa + 1 < maximoTentativas) {
-      await pausa(esperaAposLimite(resposta, tentativa));
-      continue;
+    try {
+      if (somenteLeitura) await aguardarJanelaDeLeitura(init.signal);
+      const timeout = AbortSignal.timeout(somenteLeitura ? TIMEOUT_LEITURA_BLING_MS : TIMEOUT_MUTACAO_BLING_MS);
+      const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+      const resposta = await fetch(`${BLING_API}${caminho}`, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          ...(init.headers || {}),
+        },
+        cache: 'no-store',
+        signal,
+      });
+      const corpo = await resposta.json().catch(() => null);
+      if (resposta.ok) return corpo;
+      if (somenteLeitura && STATUS_TRANSITORIOS_BLING.has(resposta.status) && tentativa + 1 < maximoTentativas) {
+        await pausa(resposta.status === 429 ? esperaAposLimite(resposta, tentativa) : Math.min(5_000, 800 * (2 ** tentativa)));
+        continue;
+      }
+      const erro = corpo?.error;
+      const campos = Array.isArray(erro?.fields)
+        ? erro.fields.map((campo: Objeto) => `${campo.element || campo.field || '?'}: ${campo.msg || campo.message || 'inválido'}`).join(' | ')
+        : '';
+      const motivo = [erro?.description || erro?.message || `HTTP ${resposta.status}`, campos].filter(Boolean).join(' — ');
+      const falha = new Error(motivo) as FalhaApi;
+      falha.status = resposta.status;
+      throw falha;
+    } catch (erro) {
+      const nome = erro instanceof Error ? erro.name : '';
+      const falhaDeRede = nome === 'TimeoutError' || nome === 'AbortError' || erro instanceof TypeError;
+      if (somenteLeitura && falhaDeRede && !init.signal?.aborted && tentativa + 1 < maximoTentativas) {
+        await pausa(Math.min(5_000, 800 * (2 ** tentativa)));
+        continue;
+      }
+      throw erro;
     }
-    const erro = corpo?.error;
-    const campos = Array.isArray(erro?.fields)
-      ? erro.fields.map((campo: Objeto) => `${campo.element || campo.field || '?'}: ${campo.msg || campo.message || 'inválido'}`).join(' | ')
-      : '';
-    const motivo = [erro?.description || erro?.message || `HTTP ${resposta.status}`, campos].filter(Boolean).join(' — ');
-    const falha = new Error(motivo) as FalhaApi;
-    falha.status = resposta.status;
-    throw falha;
   }
   throw new Error('O limite de leituras do Bling permaneceu ativo após as tentativas seguras.');
+}
+
+function operacaoPodeTerConcluido(erro: unknown) {
+  const nome = erro instanceof Error ? erro.name : '';
+  const mensagem = erro instanceof Error ? erro.message : '';
+  const status = Number((erro as FalhaApi | undefined)?.status || 0);
+  return nome === 'TimeoutError'
+    || nome === 'AbortError'
+    || /aborted|timeout|tempo limite/i.test(mensagem)
+    || STATUS_TRANSITORIOS_BLING.has(status);
 }
 
 async function listarTudo(caminho: string, token: string, maximoPaginas = 100) {
@@ -749,8 +772,14 @@ export async function POST(request: Request) {
         await pausa(500);
         contextoLog.etapa = 'enviar-put-sem-imagens';
         requisicaoEnviada = true;
-        await chamarBling(`/produtos/${idProduto}`, token, { method: 'PUT', body: JSON.stringify(corpoSemImagens) });
-        contextoLog.etapa = 'confirmar-produto-sem-imagens';
+        try {
+          await chamarBling(`/produtos/${idProduto}`, token, { method: 'PUT', body: JSON.stringify(corpoSemImagens) });
+          contextoLog.etapa = 'confirmar-produto-sem-imagens';
+        } catch (erroEnvio) {
+          if (!operacaoPodeTerConcluido(erroEnvio)) throw erroEnvio;
+          contextoLog.etapa = 'confirmar-remocao-apos-timeout';
+          console.warn('[bling/administracao] PUT de remoção demorou; conferindo resultado antes de revisar', { idProduto, codigo });
+        }
         const { depois, linksConfirmados } = await conferirSubstituicaoDeImagens(idProduto, token, antes, 0);
         if (linksConfirmados.length !== 0) throw new Error('O Bling não confirmou a remoção total das imagens.');
         const expiraEm = Date.now() + 10 * 60 * 1000;
@@ -824,9 +853,14 @@ export async function POST(request: Request) {
         await pausa(500);
         contextoLog.etapa = 'enviar-put-bling';
         requisicaoEnviada = true;
-        await chamarBling(`/produtos/${idProduto}`, token, { method: 'PUT', body: JSON.stringify(corpoPut) });
-
-        contextoLog.etapa = 'conferir-substituicao';
+        try {
+          await chamarBling(`/produtos/${idProduto}`, token, { method: 'PUT', body: JSON.stringify(corpoPut) });
+          contextoLog.etapa = 'conferir-substituicao';
+        } catch (erroEnvio) {
+          if (!operacaoPodeTerConcluido(erroEnvio)) throw erroEnvio;
+          contextoLog.etapa = 'conferir-substituicao-apos-timeout';
+          console.warn('[bling/administracao] PUT de imagens demorou; conferindo resultado antes de revisar', { idProduto, codigo });
+        }
         const { depois, linksConfirmados } = await conferirSubstituicaoDeImagens(
           idProduto,
           token,
