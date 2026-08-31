@@ -398,9 +398,16 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
       const dadosBling = await fetch(`/api/bling/administracao?recurso=produto&id=${item.id_produto_bling}`).then(jsonDaResposta);
       const produto = dadosBling.produto && typeof dadosBling.produto === 'object' ? dadosBling.produto as Record<string, unknown> : {};
       const codigo = String(produto.codigo || item.codigo).trim();
-      const dadosSupabase = await fetch(`/api/bling/administracao?recurso=imagens-supabase&codigo=${encodeURIComponent(codigo)}`).then(jsonDaResposta);
-      const originais: string[] = [...new Set<string>((Array.isArray(dadosSupabase.imagens) ? dadosSupabase.imagens : [])
+      let dadosSupabase: Record<string, unknown> = {};
+      try {
+        dadosSupabase = await fetch(`/api/bling/administracao?recurso=imagens-supabase&codigo=${encodeURIComponent(codigo)}`).then(jsonDaResposta);
+      } catch (erro) {
+        if ((erro as FalhaResposta)?.codigo !== 'IMAGENS_SUPABASE_AUSENTES') throw erro;
+      }
+      const originaisSalvas: string[] = [...new Set<string>((Array.isArray(dadosSupabase.imagens) ? dadosSupabase.imagens : [])
         .map((link: unknown) => String(link || '').trim()).filter((link: string) => /^https:\/\//i.test(link)))];
+      const imagensAtuaisBling = linksDasImagens(produto);
+      const originais = originaisSalvas.length ? originaisSalvas : imagensAtuaisBling;
       const copiasExistentes: string[] = [...new Set<string>((Array.isArray(dadosSupabase.imagensMarketplace) ? dadosSupabase.imagensMarketplace : [])
         .map((link: unknown) => String(link || '').trim()).filter((link: string) => /^https:\/\//i.test(link)))];
       const urls: string[] = [...new Set<string>((Array.isArray(item.urls_marketplace) ? item.urls_marketplace : [])
@@ -410,7 +417,16 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
         await atualizarItemLote(loteId, item.id, 'IGNORADO', 'JA_CONVERTIDO', `${copiasExistentes.length} cópia(s) 1200×1200 já existentes.`);
         return;
       }
-      if (!originais.length) throw new Error('Nenhuma imagem original foi encontrada no Storage do Supabase.');
+      if (!originais.length) {
+        await atualizarItemLote(
+          loteId,
+          item.id,
+          'IGNORADO',
+          'SEM_IMAGEM_FONTE',
+          'Produto sem imagem salva no Supabase e sem imagem atual no Bling. Nada foi alterado.',
+        );
+        return;
+      }
       if (originais.length > 10) throw new Error('Mais de 10 imagens originais; produto enviado para revisão.');
 
       if (!urls.length) {
