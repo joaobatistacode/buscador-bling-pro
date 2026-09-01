@@ -239,7 +239,7 @@ export function CategoryAdminView() {
           <div><p className="text-xs font-black uppercase tracking-wider text-cyan-700">Mapa do catálogo</p><h3 className="mt-1 text-2xl font-black">Segmento, categoria e subcategoria</h3></div>
           <button type="button" onClick={() => baixarCategorias(categorias)} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-black text-blue-700">Exportar árvore CSV</button>
         </div>
-        <CategoryBrowser categorias={categorias} produtoAberto={produto?.id} aoAbrir={abrirProduto} aoErro={setErro} />
+        <CategoryBrowser categorias={categorias} canais={canais} produtoAberto={produto?.id} aoAbrir={abrirProduto} aoErro={setErro} />
         <div className={`${cartao} p-5 md:p-7`}>
           {!produto ? <div className="grid min-h-96 place-items-center text-center text-sm text-slate-500"><div><p className="text-lg font-black text-slate-800">Selecione um produto</p><p className="mt-2">A categoria atual e os campos serão lidos diretamente do Bling.</p></div></div> : <>
             <div className="border-b border-slate-200 pb-5"><p className="font-mono text-xs font-black text-cyan-700">{produto.codigo}</p><h3 className="mt-1 text-2xl font-black">{produto.nome}</h3><p className="mt-2 text-sm text-slate-500">Atual: {nomeCategoria(produto.categoria?.id, categorias)}</p></div>
