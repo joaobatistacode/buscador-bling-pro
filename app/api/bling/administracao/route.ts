@@ -266,6 +266,57 @@ function idsPositivos(valor: string | null, limite = 200) {
   return ids;
 }
 
+function precoEmCentavos(valor: unknown) {
+  const numero = Number(valor);
+  return Number.isFinite(numero) ? Math.round(numero * 100) : Number.NaN;
+}
+
+function idsCategoriasDoVinculo(vinculo: Objeto) {
+  return (Array.isArray(vinculo.categoriasProdutos) ? vinculo.categoriasProdutos : [])
+    .map(item => Number((item as Objeto)?.id || 0))
+    .filter(id => Number.isSafeInteger(id) && id > 0);
+}
+
+function corpoVinculoComPrecoPromocional(vinculo: Objeto) {
+  const preco = Number(vinculo.preco);
+  if (!Number.isFinite(preco) || preco <= 0) throw new Error('O anúncio não possui preço normal válido.');
+  const codigo = texto(vinculo.codigo, 120, 'Código do anúncio');
+  const corpo: Objeto = {
+    codigo,
+    preco,
+    precoPromocional: preco,
+    produto: { id: inteiro((vinculo.produto as Objeto | undefined)?.id, 'Produto do anúncio') },
+    loja: { id: inteiro((vinculo.loja as Objeto | undefined)?.id, 'Loja do anúncio') },
+  };
+  const categorias = [...new Set(idsCategoriasDoVinculo(vinculo))];
+  if (categorias.length) corpo.categoriasProdutos = categorias.map(id => ({ id }));
+  for (const campo of ['fornecedorLoja', 'marcaLoja'] as const) {
+    if (vinculo[campo] !== undefined && vinculo[campo] !== null) corpo[campo] = vinculo[campo];
+  }
+  return corpo;
+}
+
+function retratoVinculoSemPromocional(vinculo: Objeto) {
+  const copia = { ...vinculo };
+  delete copia.precoPromocional;
+  delete copia.dataAlteracao;
+  return copia;
+}
+
+async function conferirPrecoPromocional(idVinculo: number, preco: number, token: string, antes: Objeto) {
+  let depois: Objeto | undefined;
+  for (let tentativa = 0; tentativa < 6; tentativa++) {
+    await pausa(tentativa === 0 ? 1_000 : 1_500);
+    depois = (await chamarBling(`/produtos/lojas/${idVinculo}`, token))?.data as Objeto | undefined;
+    if (!depois) continue;
+    if (hash(retratoVinculoSemPromocional(antes)) !== hash(retratoVinculoSemPromocional(depois))) {
+      throw new Error('ALERTA: o anúncio mudou fora do preço promocional. Interrompa o lote e revise este produto.');
+    }
+    if (precoEmCentavos(depois.precoPromocional) === precoEmCentavos(preco)) return depois;
+  }
+  throw new Error('O Bling respondeu, mas não confirmou o preço promocional igual ao preço normal.');
+}
+
 async function listarProdutosDasCategorias(ids: number[], token: string, busca: string, signal?: AbortSignal) {
   const mapa = new Map<number, unknown>();
   let truncado = false;
@@ -683,6 +734,69 @@ export async function POST(request: Request) {
     contextoLog.acao = acao || 'desconhecida';
     contextoLog.etapa = 'obter-token-bling';
     const token = await tokenDaSessao();
+
+    if (acao === 'igualar-preco-promocional') {
+      const idProduto = inteiro(pedido.idProduto, 'Produto');
+      const idLoja = inteiro(pedido.idLoja, 'Loja');
+      const codigoConfirmado = texto(pedido.confirmacao, 120, 'SKU de confirmação');
+      contextoLog.idProduto = idProduto;
+      contextoLog.codigo = codigoConfirmado;
+      contextoLog.etapa = 'localizar-vinculo-produto-loja';
+      const encontrados = await listarTudo(`/produtos/lojas?idProduto=${idProduto}&idLoja=${idLoja}`, token, 5) as Objeto[];
+      const exatos = encontrados.filter(item =>
+        Number((item.produto as Objeto | undefined)?.id || 0) === idProduto
+        && Number((item.loja as Objeto | undefined)?.id || 0) === idLoja
+      );
+      if (!exatos.length) throw new Error('Este produto não possui anúncio vinculado à loja escolhida.');
+      if (exatos.length > 1) throw new Error('O produto possui mais de um vínculo com esta loja e precisa de conferência manual.');
+      const idVinculo = inteiro(exatos[0].id, 'Vínculo produto–loja');
+      contextoLog.etapa = 'reler-anuncio';
+      const antes = (await chamarBling(`/produtos/lojas/${idVinculo}`, token))?.data as Objeto;
+      if (!antes) throw new Error('O Bling não devolveu os dados completos do anúncio.');
+      const codigo = texto(antes.codigo, 120, 'Código do anúncio');
+      if (codigo !== codigoConfirmado) throw new Error(`O vínculo encontrado pertence ao código ${codigo}, não ao SKU confirmado.`);
+      const preco = Number(antes.preco);
+      const precoPromocionalAntes = Number(antes.precoPromocional || 0);
+      if (!Number.isFinite(preco) || preco <= 0) throw new Error('O anúncio não possui preço normal válido.');
+      if (precoEmCentavos(precoPromocionalAntes) === precoEmCentavos(preco)) {
+        return Response.json({ status: 'PRONTO', idVinculo, codigo, preco, precoPromocionalAntes, precoPromocionalDepois: preco });
+      }
+      const corpo = corpoVinculoComPrecoPromocional(antes);
+      contextoLog.etapa = 'abrir-auditoria-preco-promocional';
+      const auditoria = await iniciarAuditoria({
+        tipo: 'ALTERAR_PRECO_PROMOCIONAL',
+        id_produto_bling: idProduto,
+        codigo,
+        antes: { idVinculo, preco, precoPromocional: precoPromocionalAntes },
+        solicitado: { idVinculo, precoPromocional: preco },
+      });
+      let requisicaoEnviada = false;
+      try {
+        await pausa(500);
+        contextoLog.etapa = 'enviar-put-preco-promocional';
+        requisicaoEnviada = true;
+        try {
+          await chamarBling(`/produtos/lojas/${idVinculo}`, token, { method: 'PUT', body: JSON.stringify(corpo) });
+        } catch (erroEnvio) {
+          if (!operacaoPodeTerConcluido(erroEnvio)) throw erroEnvio;
+          contextoLog.etapa = 'conferir-preco-apos-timeout';
+        }
+        contextoLog.etapa = 'conferir-preco-promocional';
+        const depois = await conferirPrecoPromocional(idVinculo, preco, token, antes);
+        await concluirAuditoria(auditoria, 'SUCESSO');
+        return Response.json({
+          status: 'CONCLUIDO',
+          idVinculo,
+          codigo,
+          preco,
+          precoPromocionalAntes,
+          precoPromocionalDepois: Number(depois.precoPromocional),
+        });
+      } catch (erro) {
+        await concluirAuditoria(auditoria, requisicaoEnviada ? 'REVISAO' : 'FALHA', erro instanceof Error ? erro.message : 'Falha não identificada').catch(() => null);
+        throw erro;
+      }
+    }
 
     if (acao === 'simular-imagens') {
       const idProduto = inteiro(pedido.idProduto, 'Produto');

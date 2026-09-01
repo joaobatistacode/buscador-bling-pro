@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 export type CategoriaCatalogo = { id: number; descricao: string; categoriaPai?: { id?: number } };
+export type CanalCatalogo = { id: number; descricao: string; tipo: string; situacao: number };
 export type ProdutoCatalogo = {
   id: number;
   codigo: string;
@@ -66,6 +67,15 @@ type LoteImagens = {
   concluidos: number;
   ignorados: number;
   falhas: number;
+  atualizar_preco_promocional?: boolean;
+  preco_teste_confirmado?: boolean;
+  id_loja_bling?: number | null;
+  loja?: string | null;
+  precos_pendentes?: number;
+  precos_processando?: number;
+  precos_concluidos?: number;
+  precos_prontos?: number;
+  precos_falhas?: number;
   created_at: string;
 };
 
@@ -81,11 +91,29 @@ type ItemLoteImagens = {
   urls_marketplace?: string[];
   motivo?: string | null;
   tentativas: number;
+  preco_status?: 'DESATIVADO' | 'PENDENTE' | 'PROCESSANDO' | 'CONCLUIDO' | 'PRONTO' | 'REVISAO';
+  preco?: number | null;
+  preco_promocional_antes?: number | null;
+  preco_promocional_depois?: number | null;
+  preco_motivo?: string | null;
   concluido_em?: string | null;
+};
+
+type ErroOperacional = {
+  id: string;
+  origem: 'IMAGENS' | 'PRECO_PROMOCIONAL';
+  codigo: string;
+  produto: string;
+  etapa: string;
+  mensagem: string;
+  status: 'PENDENTE' | 'RESOLVIDO';
+  tentativas: number;
+  updated_at: string;
 };
 
 type Props = {
   categorias: CategoriaCatalogo[];
+  canais: CanalCatalogo[];
   produtoAberto?: number;
   aoAbrir: (produto: ProdutoCatalogo) => void;
   aoErro: (mensagem: string) => void;
@@ -205,7 +233,24 @@ function baixarProdutos(produtos: ProdutoCatalogo[], categorias: CategoriaCatalo
   URL.revokeObjectURL(url);
 }
 
-export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: Props) {
+function baixarErros(erros: ErroOperacional[]) {
+  const linhas = [
+    ['sku', 'produto', 'origem', 'etapa', 'erro', 'tentativas', 'situacao', 'atualizado_em'],
+    ...erros.map(item => [item.codigo, item.produto, item.origem, item.etapa, item.mensagem, String(item.tentativas), item.status, item.updated_at]),
+  ];
+  const csv = linhas.map(linha => linha.map(valor => {
+    const seguro = /^[=+\-@]/.test(valor) ? `'${valor}` : valor;
+    return `"${seguro.replaceAll('"', '""')}"`;
+  }).join(';')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `erros-operacionais-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+export function CategoryBrowser({ categorias, canais, produtoAberto, aoAbrir, aoErro }: Props) {
   const idsConhecidos = useMemo(() => new Set(categorias.map(item => item.id)), [categorias]);
   const segmentos = useMemo(() => categorias
     .filter(item => !item.categoriaPai?.id || !idsConhecidos.has(Number(item.categoriaPai.id)))
@@ -236,7 +281,11 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
   const [selecionadosLote, setSelecionadosLote] = useState<Record<number, ProdutoCatalogo>>({});
   const [loteImagens, setLoteImagens] = useState<LoteImagens>();
   const [itensLote, setItensLote] = useState<ItemLoteImagens[]>([]);
-  const [abaLote, setAbaLote] = useState<'FILA' | 'CONCLUIDOS'>('FILA');
+  const [abaLote, setAbaLote] = useState<'FILA' | 'CONCLUIDOS' | 'ERROS'>('FILA');
+  const [errosOperacionais, setErrosOperacionais] = useState<ErroOperacional[]>([]);
+  const [errosResolvidos, setErrosResolvidos] = useState(false);
+  const [idLojaPreco, setIdLojaPreco] = useState('');
+  const [mensagemPreco, setMensagemPreco] = useState('');
   const [carregandoLote, setCarregandoLote] = useState(false);
   const [executandoLote, setExecutandoLote] = useState(false);
   const [itemAtualLote, setItemAtualLote] = useState<ItemLoteImagens>();
@@ -255,6 +304,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
   const porId = useMemo(() => new Map(categorias.map(item => [item.id, item])), [categorias]);
   const trilha = [segmentoAtualId, categoriaId, subcategoriaId].filter(Boolean).map(id => porId.get(Number(id))?.descricao).filter(Boolean).join(' › ');
   const aguardandoDiagnostico = <span className="text-xs font-semibold text-slate-400">Clique em conferir</span>;
+  const idLojaPrecoEfetivo = idLojaPreco || String(canais.find(canal => /casas\s*bahia/i.test(`${canal.descricao} ${canal.tipo}`))?.id || '');
 
   const consultar = async () => {
     if (!idsConsulta.length) return;
@@ -313,6 +363,21 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(pedido),
   }));
+
+  const carregarErros = async (resolvidos = errosResolvidos) => {
+    const status = resolvidos ? 'RESOLVIDO' : 'PENDENTE';
+    const dados = await jsonDaResposta(await fetch(`/api/bling/imagens-lote?recurso=erros&status=${status}`));
+    setErrosOperacionais(Array.isArray(dados.erros) ? dados.erros as ErroOperacional[] : []);
+  };
+
+  useEffect(() => {
+    if (abaLote !== 'ERROS') return;
+    const atraso = window.setTimeout(() => {
+      void carregarErros().catch(erro => aoErro(erro instanceof Error ? erro.message : 'Não foi possível carregar o histórico de erros.'));
+    }, 0);
+    return () => window.clearTimeout(atraso);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [abaLote, errosResolvidos]);
 
   const carregarLote = async (id?: string) => {
     setCarregandoLote(true);
@@ -421,7 +486,7 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
         await atualizarItemLote(
           loteId,
           item.id,
-          'IGNORADO',
+          'FALHA',
           'SEM_IMAGEM_FONTE',
           'Produto sem imagem salva no Supabase e sem imagem atual no Bling. Nada foi alterado.',
         );
@@ -486,6 +551,83 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
     }
   };
 
+  const configurarPrecoPromocional = async () => {
+    if (!loteImagens || !idLojaPrecoEfetivo) return;
+    const loja = canais.find(canal => String(canal.id) === idLojaPrecoEfetivo);
+    if (!loja) return;
+    setCarregandoLote(true);
+    aoErro('');
+    try {
+      await apiLote({ acao: 'configurar-preco', loteId: loteImagens.id, idLoja: loja.id, loja: loja.descricao });
+      setConfirmacaoLote('');
+      await carregarLote(loteImagens.id);
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'Não foi possível incluir o preço promocional neste lote.');
+    } finally {
+      setCarregandoLote(false);
+    }
+  };
+
+  const processarPrecoItem = async (loteId: string, item: ItemLoteImagens, idLoja: number, teste = false) => {
+    try {
+      const resultado = await jsonDaResposta(await fetch('/api/bling/administracao', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          acao: 'igualar-preco-promocional',
+          idProduto: item.id_produto_bling,
+          idLoja,
+          confirmacao: item.codigo,
+        }),
+      }));
+      await apiLote({
+        acao: 'atualizar-preco-item',
+        loteId,
+        itemId: item.id,
+        status: resultado.status === 'PRONTO' ? 'PRONTO' : 'CONCLUIDO',
+        preco: resultado.preco,
+        precoPromocionalAntes: resultado.precoPromocionalAntes,
+        precoPromocionalDepois: resultado.precoPromocionalDepois,
+        teste,
+        motivo: resultado.status === 'PRONTO' ? 'O preço promocional já era igual ao preço normal.' : 'Preço promocional atualizado e conferido no Bling.',
+      });
+      if (teste) {
+        setMensagemPreco(resultado.status === 'PRONTO'
+          ? `O SKU ${item.codigo} já estava correto. Teste o próximo produto para confirmar uma alteração real.`
+          : `Teste aprovado no SKU ${item.codigo}: preço promocional atualizado e conferido.`);
+      }
+    } catch (erro) {
+      await apiLote({
+        acao: 'atualizar-preco-item',
+        loteId,
+        itemId: item.id,
+        status: 'REVISAO',
+        motivo: erro instanceof Error ? erro.message : 'Falha não identificada ao atualizar o preço promocional.',
+      }).catch(() => null);
+    }
+  };
+
+  const testarPrecoPromocional = async () => {
+    if (!loteImagens) return;
+    setCarregandoLote(true);
+    setMensagemPreco('');
+    aoErro('');
+    try {
+      const retorno = await apiLote({ acao: 'reivindicar-teste-preco', loteId: loteImagens.id });
+      if (retorno.confirmado) return;
+      const item = retorno.item as ItemLoteImagens | undefined;
+      if (!item) throw new Error('Nenhum produto foi reservado para o teste.');
+      setItemAtualLote(item);
+      await processarPrecoItem(loteImagens.id, item, Number(retorno.idLoja), true);
+      await carregarLote(loteImagens.id);
+    } catch (erro) {
+      aoErro(erro instanceof Error ? erro.message : 'Não foi possível executar o teste de preço.');
+    } finally {
+      setItemAtualLote(undefined);
+      setCarregandoLote(false);
+    }
+  };
+
   const executarLoteImagens = async () => {
     if (!loteImagens || confirmacaoLote !== 'ENVIAR') return;
     interromperLote.current = false;
@@ -496,12 +638,16 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
       await apiLote({ acao: 'iniciar', loteId: loteImagens.id });
       while (!interromperLote.current) {
         const retorno = await apiLote({ acao: 'reivindicar', loteId: loteImagens.id });
-        if (retorno.pausado || retorno.finalizado) break;
+        if (retorno.pausado || retorno.finalizado || retorno.aguardandoTestePreco) break;
         if (retorno.concorrencia) continue;
         const item = retorno.item as ItemLoteImagens | undefined;
         if (!item) break;
         setItemAtualLote(item);
-        await processarItemLote(loteImagens.id, item);
+        if (retorno.tipo === 'PRECO') {
+          await processarPrecoItem(loteImagens.id, item, Number(retorno.idLoja));
+        } else {
+          await processarItemLote(loteImagens.id, item);
+        }
         await carregarLote(loteImagens.id);
       }
     } catch (erro) {
@@ -736,13 +882,27 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
   };
 
   const quantidadeSelecionada = Object.keys(selecionadosLote).length;
-  const itensFilaLote = itensLote.filter(item => !['CONCLUIDO', 'IGNORADO'].includes(item.status));
-  const itensConcluidosLote = itensLote.filter(item => ['CONCLUIDO', 'IGNORADO'].includes(item.status));
-  const itensExibidosLote = abaLote === 'FILA' ? itensFilaLote : itensConcluidosLote;
+  const precoAtivo = Boolean(loteImagens?.atualizar_preco_promocional);
+  const itemTotalmenteConcluido = (item: ItemLoteImagens) =>
+    ['CONCLUIDO', 'IGNORADO'].includes(item.status)
+    && (!precoAtivo || ['CONCLUIDO', 'PRONTO'].includes(String(item.preco_status)));
+  const itensFilaLote = itensLote.filter(item => !itemTotalmenteConcluido(item));
+  const itensConcluidosLote = itensLote.filter(itemTotalmenteConcluido);
+  const itensExibidosLote = abaLote === 'FILA' ? itensFilaLote : abaLote === 'CONCLUIDOS' ? itensConcluidosLote : [];
   const progressoLote = loteImagens?.total
     ? Math.round(((loteImagens.concluidos + loteImagens.ignorados + loteImagens.falhas) / loteImagens.total) * 100)
     : 0;
   const loteAberto = Boolean(loteImagens && ['PRONTO', 'EM_ANDAMENTO', 'PAUSADO'].includes(loteImagens.status));
+  const haPendenciasLote = Boolean(loteImagens && (
+    loteImagens.pendentes > 0
+    || Number(loteImagens.precos_pendentes || 0) > 0
+  ));
+  const aguardandoTestePreco = Boolean(
+    precoAtivo
+    && loteImagens?.pendentes === 0
+    && Number(loteImagens?.precos_pendentes || 0) > 0
+    && !loteImagens?.preco_teste_confirmado
+  );
 
   return (
     <div className="space-y-5">
@@ -894,6 +1054,31 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
             ].map(([rotulo, valor, cor]) => <div key={String(rotulo)} className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm"><p className="text-[10px] font-black uppercase tracking-wider text-slate-500">{rotulo}</p><p className={`mt-1 text-2xl font-black ${cor}`}>{valor}</p></div>)}
           </div>
 
+          {!loteImagens.atualizar_preco_promocional ? <div className="mt-4 rounded-2xl border-2 border-blue-200 bg-blue-50 p-4">
+            <p className="text-xs font-black uppercase tracking-wider text-blue-700">Incluir no mesmo processamento</p>
+            <h4 className="mt-1 text-lg font-black text-blue-950">Preço promocional igual ao preço normal</h4>
+            <p className="mt-1 text-xs leading-5 text-blue-800">Depois das fotos 1200×1200, o sistema atualizará somente o vínculo do anúncio na loja escolhida. Produtos sem vínculo irão para o histórico de erros.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <select value={idLojaPrecoEfetivo} onChange={evento => setIdLojaPreco(evento.target.value)} disabled={executandoLote} className="min-w-64 rounded-xl border border-blue-300 bg-white px-3 py-2.5 text-sm font-bold">
+                <option value="">Selecione a loja</option>
+                {canais.map(canal => <option key={canal.id} value={canal.id}>{canal.descricao} · {canal.tipo}</option>)}
+              </select>
+              <button type="button" onClick={configurarPrecoPromocional} disabled={!idLojaPrecoEfetivo || executandoLote || carregandoLote} className="rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">Adicionar preço promocional ao lote</button>
+            </div>
+          </div> : <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-black uppercase tracking-wider text-emerald-700">Etapa comercial ativa</p><p className="mt-1 font-black text-emerald-950">{loteImagens.loja}: preço promocional = preço normal</p></div><span className={`rounded-full bg-white px-3 py-1 text-xs font-black ${loteImagens.preco_teste_confirmado ? 'text-emerald-700' : 'text-amber-700'}`}>{loteImagens.preco_teste_confirmado ? 'teste aprovado' : 'aguardando teste de 1 produto'}</span></div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-5">
+              {[
+                ['Pendentes', loteImagens.precos_pendentes || 0],
+                ['Processando', loteImagens.precos_processando || 0],
+                ['Atualizados', loteImagens.precos_concluidos || 0],
+                ['Já iguais', loteImagens.precos_prontos || 0],
+                ['Revisar', loteImagens.precos_falhas || 0],
+              ].map(([rotulo, valor]) => <div key={String(rotulo)} className="rounded-xl border border-emerald-100 bg-white p-3"><p className="text-[9px] font-black uppercase text-slate-500">{rotulo}</p><p className="mt-1 text-xl font-black text-slate-950">{valor}</p></div>)}
+            </div>
+            {mensagemPreco && <p className="mt-3 rounded-xl bg-white px-3 py-2 text-xs font-bold text-emerald-900">{mensagemPreco}</p>}
+          </div>}
+
           <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="flex items-center justify-between gap-3 text-xs font-black text-slate-700"><span>Status: {loteImagens.status.replaceAll('_', ' ')}</span><span>{progressoLote}%</span></div>
             <div className="mt-2 h-3 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all" style={{ width: `${progressoLote}%` }} /></div>
@@ -901,28 +1086,33 @@ export function CategoryBrowser({ categorias, produtoAberto, aoAbrir, aoErro }: 
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            {loteImagens.status !== 'EM_ANDAMENTO' && loteImagens.pendentes > 0 && <>
+            {aguardandoTestePreco && <button type="button" onClick={testarPrecoPromocional} disabled={carregandoLote || executandoLote} className="rounded-xl bg-violet-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">Testar preço em somente 1 produto</button>}
+            {loteImagens.status !== 'EM_ANDAMENTO' && haPendenciasLote && <>
               <input value={confirmacaoLote} onChange={evento => setConfirmacaoLote(evento.target.value.toUpperCase())} className="min-w-[190px] rounded-xl border border-slate-300 px-3 py-2.5 text-sm font-black" placeholder="Digite ENVIAR" />
-              <button type="button" onClick={executarLoteImagens} disabled={executandoLote || confirmacaoLote !== 'ENVIAR'} className="rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{loteImagens.status === 'PAUSADO' ? 'Retomar envio' : 'Iniciar envio ao Bling'}</button>
+              <button type="button" onClick={executarLoteImagens} disabled={executandoLote || confirmacaoLote !== 'ENVIAR' || aguardandoTestePreco} className="rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{aguardandoTestePreco ? 'Faça o teste de 1 produto' : loteImagens.status === 'PAUSADO' ? 'Retomar envio' : 'Iniciar envio ao Bling'}</button>
             </>}
             {(executandoLote || loteImagens.status === 'EM_ANDAMENTO') && <button type="button" onClick={pausarLoteImagens} className="rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-black text-amber-950">Pausar com segurança</button>}
-            {loteImagens.falhas > 0 && !executandoLote && <button type="button" onClick={tentarFalhasNovamente} className="rounded-xl border border-rose-300 bg-rose-50 px-4 py-2.5 text-sm font-black text-rose-800">Tentar falhas novamente</button>}
+            {(loteImagens.falhas > 0 || Number(loteImagens.precos_falhas || 0) > 0) && !executandoLote && <button type="button" onClick={tentarFalhasNovamente} className="rounded-xl border border-rose-300 bg-rose-50 px-4 py-2.5 text-sm font-black text-rose-800">Tentar falhas novamente</button>}
             <button type="button" onClick={() => void carregarLote(loteImagens.id)} disabled={carregandoLote} className="ml-auto rounded-xl border border-slate-300 px-3 py-2.5 text-xs font-black text-slate-700 disabled:opacity-40">Atualizar</button>
           </div>
 
           <div className="mt-5 flex gap-2 border-b border-slate-200">
             <button type="button" onClick={() => setAbaLote('FILA')} className={`border-b-2 px-4 py-3 text-sm font-black ${abaLote === 'FILA' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500'}`}>Fila ({itensFilaLote.length})</button>
             <button type="button" onClick={() => setAbaLote('CONCLUIDOS')} className={`border-b-2 px-4 py-3 text-sm font-black ${abaLote === 'CONCLUIDOS' ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-slate-500'}`}>Concluídos ({itensConcluidosLote.length})</button>
+            <button type="button" onClick={() => setAbaLote('ERROS')} className={`border-b-2 px-4 py-3 text-sm font-black ${abaLote === 'ERROS' ? 'border-rose-600 text-rose-700' : 'border-transparent text-slate-500'}`}>Histórico de erros</button>
           </div>
 
-          <div className="mt-3 max-h-[430px] space-y-2 overflow-auto pr-1">
+          {abaLote !== 'ERROS' ? <div className="mt-3 max-h-[430px] space-y-2 overflow-auto pr-1">
             {itensExibidosLote.map(item => <article key={item.id} className={`flex flex-wrap items-center gap-3 rounded-2xl border p-3 ${item.status === 'PROCESSANDO' ? 'border-violet-300 bg-violet-50' : item.status === 'CONCLUIDO' ? 'border-emerald-200 bg-emerald-50' : item.status === 'IGNORADO' ? 'border-amber-200 bg-amber-50' : item.status === 'FALHA' || item.status === 'REVISAO' ? 'border-rose-200 bg-rose-50' : 'border-slate-200 bg-white'}`}>
               <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-900 text-xs font-black text-white">{item.posicao}</span>
-              <div className="min-w-0 flex-1"><p className="truncate text-sm font-black text-slate-950"><span className="font-mono text-cyan-700">{item.codigo}</span> · {item.produto}</p><p className="mt-1 text-xs font-semibold text-slate-600">{item.motivo || item.etapa.replaceAll('_', ' ')}</p></div>
-              <span className="rounded-full bg-white px-3 py-1 text-[10px] font-black uppercase text-slate-700 shadow-sm">{item.status.replaceAll('_', ' ')}</span>
+              <div className="min-w-0 flex-1"><p className="truncate text-sm font-black text-slate-950"><span className="font-mono text-cyan-700">{item.codigo}</span> · {item.produto}</p><p className="mt-1 text-xs font-semibold text-slate-600">{item.motivo || item.etapa.replaceAll('_', ' ')}</p>{precoAtivo && <p className={`mt-1 text-xs font-bold ${item.preco_status === 'REVISAO' ? 'text-rose-700' : 'text-blue-700'}`}>Preço: {String(item.preco_status || 'PENDENTE').replaceAll('_', ' ')}{item.preco_motivo ? ` · ${item.preco_motivo}` : ''}</p>}</div>
+              <div className="flex flex-col items-end gap-1"><span className="rounded-full bg-white px-3 py-1 text-[10px] font-black uppercase text-slate-700 shadow-sm">Fotos: {item.status.replaceAll('_', ' ')}</span>{precoAtivo && <span className="rounded-full bg-white px-3 py-1 text-[10px] font-black uppercase text-blue-700 shadow-sm">Preço: {String(item.preco_status || 'PENDENTE').replaceAll('_', ' ')}</span>}</div>
             </article>)}
             {!itensExibidosLote.length && <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm font-semibold text-slate-500">Nenhum produto nesta aba.</div>}
-          </div>
+          </div> : <div className="mt-3">
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl bg-rose-50 p-3"><button type="button" onClick={() => setErrosResolvidos(false)} className={`rounded-lg px-3 py-2 text-xs font-black ${!errosResolvidos ? 'bg-rose-700 text-white' : 'bg-white text-rose-700'}`}>Pendentes</button><button type="button" onClick={() => setErrosResolvidos(true)} className={`rounded-lg px-3 py-2 text-xs font-black ${errosResolvidos ? 'bg-slate-700 text-white' : 'bg-white text-slate-700'}`}>Resolvidos</button><span className="text-xs font-bold text-rose-900">{errosOperacionais.length} registro(s)</span><button type="button" onClick={() => baixarErros(errosOperacionais)} disabled={!errosOperacionais.length} className="ml-auto rounded-lg border border-rose-300 bg-white px-3 py-2 text-xs font-black text-rose-800 disabled:opacity-40">Exportar todos em CSV</button></div>
+            <div className="max-h-[430px] space-y-2 overflow-auto pr-1">{errosOperacionais.map(item => <article key={item.id} className="rounded-2xl border border-rose-200 bg-rose-50 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-xs font-black text-rose-700">{item.codigo}</p><p className="mt-1 text-sm font-black text-slate-950">{item.produto}</p></div><span className="rounded-full bg-white px-3 py-1 text-[10px] font-black uppercase text-rose-700">{item.origem.replaceAll('_', ' ')}</span></div><p className="mt-3 text-sm font-semibold text-rose-900">{item.mensagem}</p><p className="mt-2 text-xs text-rose-700">Etapa: {item.etapa.replaceAll('_', ' ')} · {item.tentativas} tentativa(s) · {new Date(item.updated_at).toLocaleString('pt-BR')}</p></article>)}{!errosOperacionais.length && <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm font-semibold text-slate-500">Nenhum erro nesta situação.</div>}</div>
+          </div>}
         </div> : <div className="p-8 text-center"><p className="text-sm font-bold text-slate-600">Selecione os produtos na lista abaixo e crie a primeira fila.</p></div>}
       </section>
 
