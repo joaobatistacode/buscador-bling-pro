@@ -782,6 +782,14 @@ export default function Home() {
     const porCodigo = new Map<string, ProdutoResultado>(
       resultados.filter(resultado => !codigoTemporario(resultado.codigo)).map(r => [r.codigo, r])
     );
+    itens.forEach((item, indice) => {
+      const temporario = resultados.find(resultado =>
+        resultado.codigo.toUpperCase() === `TEMP-${indice}`
+      );
+      if (temporario && !porCodigo.has(item.codigo)) {
+        porCodigo.set(item.codigo, { ...temporario, codigo: item.codigo, nome: item.nome });
+      }
+    });
     const precisaGemini = itens.some(item => !temFichaCompleta(porCodigo.get(item.codigo)));
     if (precisaGemini && !apiKeyGemini) {
       alert("Insira uma chave válida do Gemini para corrigir as fichas incompletas.");
@@ -947,6 +955,8 @@ export default function Home() {
     }
 
     const lista = [...porCodigo.values()];
+    setResultados(lista);
+    salvarHistorico(lista);
     const comErro = lista.filter(deuErro).length;
     const semImagem = lista.filter(r => !r.img1).length;
 
