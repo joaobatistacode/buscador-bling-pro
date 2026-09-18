@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { lerCorpoLimitado, naoAutorizado, origemInvalida, origemPermitida, temAcesso } from '@/lib/acesso';
 import { buscarImagensComGaleria, montarTermosImagem, pesquisarEspecificacoes, type FonteProduto, type ImagemPesquisada } from '@/lib/product-research';
+import { mensagemErro } from '@/lib/errors';
 
 // Modelo "lite": cota gratuita bem maior que o flash normal, o que importa em lotes grandes.
 const MODELO_GEMINI = 'gemini-flash-lite-latest';
@@ -38,7 +39,7 @@ function limparHtml(texto: string): string {
 async function buscarImagensSerper(
   termo: string,
   chaveSerper: string,
-  debug: any[],
+  debug: Array<Record<string, unknown>>,
   referenciaProduto: string,
   permitirBuscaWeb = false
 ) {
@@ -53,8 +54,8 @@ async function buscarImagensSerper(
       diagnostico: dados.diagnostico,
     });
     return { urls: dados.urls, detalhes: dados.detalhes };
-  } catch (e: any) {
-    debug.push({ termo, excecao: e.message });
+  } catch (erro: unknown) {
+    debug.push({ termo, excecao: mensagemErro(erro) });
   }
   return { urls: [] as string[], detalhes: [] as ImagemPesquisada[] };
 }
@@ -123,12 +124,17 @@ const ESQUEMA_DESCRICAO = {
 };
 
 // Quando estoura a cota, o Google informa quantos segundos esperar.
-function segundosParaTentarDeNovo(erro: any): number | null {
-  const detalhes = erro?.details;
+function segundosParaTentarDeNovo(erro: unknown): number | null {
+  const objeto = erro && typeof erro === 'object'
+    ? erro as Record<string, unknown>
+    : {};
+  const detalhes = objeto.details;
   if (!Array.isArray(detalhes)) return null;
 
   for (const item of detalhes) {
-    const valor = item?.retryDelay;
+    const valor = item && typeof item === 'object'
+      ? (item as Record<string, unknown>).retryDelay
+      : undefined;
     if (typeof valor === 'string') {
       const casa = valor.match(/^([\d.]+)s$/);
       if (casa) return Math.ceil(parseFloat(casa[1]));
@@ -277,14 +283,18 @@ identificado. Não invente a marca.`;
       const resposta = dados.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!resposta) throw new Error("A IA respondeu vazio.");
 
-      let bruto: any;
+      let bruto: Record<string, unknown>;
       try {
-        bruto = JSON.parse(resposta);
+        const analisado: unknown = JSON.parse(resposta);
+        if (!analisado || typeof analisado !== 'object' || Array.isArray(analisado)) {
+          throw new Error('A IA respondeu num formato inesperado.');
+        }
+        bruto = analisado as Record<string, unknown>;
       } catch {
         throw new Error("A IA respondeu num formato inesperado.");
       }
 
-      const campo = (valor: any) => {
+      const campo = (valor: unknown) => {
         const texto = limparHtml(String(valor ?? "").trim());
         return texto || FICHA_VAZIA;
       };
@@ -411,7 +421,7 @@ export async function POST(request: Request) {
       sitesPreferenciais,
       limiteConsultasImagens
     );
-    const debugImg: any[] = [];
+    const debugImg: Array<Record<string, unknown>> = [];
 
     if (!buscarImagens) {
       debugImg.push({ info: preservarImagensExistentes
@@ -461,13 +471,14 @@ export async function POST(request: Request) {
     try {
       const fontes = await fontesPromise;
       ficha = await gerarDescricoes(nome, apiKey.trim(), referencias, fontes);
-    } catch (e: any) {
-      console.log("Erro no Gemini:", e.message);
-      ficha = { ...ficha, curta: `Erro IA: ${e.message}` };
+    } catch (erro: unknown) {
+      const mensagem = mensagemErro(erro, 'Falha desconhecida na IA.');
+      console.log("Erro no Gemini:", mensagem);
+      ficha = { ...ficha, curta: `Erro IA: ${mensagem}` };
 
-      if (e instanceof ErroDeCota) {
+      if (erro instanceof ErroDeCota) {
         cotaExcedida = true;
-        esperarSegundos = e.esperar;
+        esperarSegundos = erro.esperar;
       }
     }
 
@@ -489,7 +500,7 @@ export async function POST(request: Request) {
       debugImg
     });
 
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (erro: unknown) {
+    return NextResponse.json({ error: mensagemErro(erro) }, { status: 500 });
   }
 }

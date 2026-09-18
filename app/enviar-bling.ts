@@ -1,6 +1,9 @@
 // Lado do navegador da integração com o Bling: sobe as imagens tratadas para
 // o Supabase (o Bling só aceita imagem por link) e chama a nossa rota de envio.
 
+import type { ProdutoResultado } from './produtos';
+import { mensagemErro } from '@/lib/errors';
+
 export interface ResultadoEnvio {
   codigo: string;
   enviado: boolean;
@@ -10,7 +13,7 @@ export interface ResultadoEnvio {
   avisosBling?: string[];
   aviso?: string;
   erro?: string;
-  corpo?: any;
+  corpo?: Record<string, unknown>;
 }
 
 export interface OpcoesEnvio {
@@ -27,10 +30,11 @@ const nomeSeguro = (texto: string) =>
 
 // Sobe as imagens do produto e devolve as URLs públicas do Supabase.
 async function subirImagens(
-  produto: any,
+  produto: ProdutoResultado,
   opcoes: OpcoesEnvio
 ): Promise<{ urls: string[]; falhas: string[] }> {
-  const origens = [produto.img1, produto.img2, produto.img3, produto.img4].filter(Boolean);
+  const origens = [produto.img1, produto.img2, produto.img3, produto.img4]
+    .filter((url): url is string => Boolean(url));
   const urls: string[] = [];
   const falhas: string[] = [];
   const codigo = nomeSeguro(String(produto.codigo));
@@ -60,8 +64,8 @@ async function subirImagens(
       }
 
       urls.push(dados.url);
-    } catch (e: any) {
-      falhas.push(`imagem ${i + 1}: ${e.message}`);
+    } catch (erro: unknown) {
+      falhas.push(`imagem ${i + 1}: ${mensagemErro(erro)}`);
     }
   }
 
@@ -69,7 +73,7 @@ async function subirImagens(
 }
 
 export async function enviarProduto(
-  produto: any,
+  produto: ProdutoResultado,
   opcoes: OpcoesEnvio
 ): Promise<ResultadoEnvio> {
   // As imagens só sobem de verdade quando não é simulação, para não encher
@@ -104,22 +108,27 @@ export async function enviarProduto(
       }),
     });
 
-    const dados = await res.json();
+    const dados = await res.json() as Record<string, unknown>;
 
-    const ignorados = [...(dados.ignorados || []), ...falhasImagem];
+    const ignoradosResposta = Array.isArray(dados.ignorados)
+      ? dados.ignorados.map(String)
+      : [];
+    const ignorados = [...ignoradosResposta, ...falhasImagem];
 
     return {
       codigo: produto.codigo,
       enviado: !!dados.enviado,
-      simulado: dados.simulado,
-      alterados: dados.alterados,
+      simulado: dados.simulado === true,
+      alterados: Array.isArray(dados.alterados) ? dados.alterados.map(String) : undefined,
       ignorados,
-      avisosBling: dados.avisosBling,
-      aviso: dados.aviso,
-      erro: dados.erro,
-      corpo: dados.corpo,
+      avisosBling: Array.isArray(dados.avisosBling) ? dados.avisosBling.map(String) : undefined,
+      aviso: typeof dados.aviso === 'string' ? dados.aviso : undefined,
+      erro: typeof dados.erro === 'string' ? dados.erro : undefined,
+      corpo: dados.corpo && typeof dados.corpo === 'object' && !Array.isArray(dados.corpo)
+        ? dados.corpo as Record<string, unknown>
+        : undefined,
     };
-  } catch (e: any) {
-    return { codigo: produto.codigo, enviado: false, erro: `falha de rede: ${e.message}` };
+  } catch (erro: unknown) {
+    return { codigo: produto.codigo, enviado: false, erro: `falha de rede: ${mensagemErro(erro)}` };
   }
 }

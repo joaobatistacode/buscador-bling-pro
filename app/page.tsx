@@ -8,8 +8,10 @@ import { WorkflowStepper, type EtapaFluxo } from './components/workflow-stepper'
 import { produtoComErro, produtoSemFotos, type CampoImagem, type ProdutoResultado } from './produtos';
 import { DashboardView, HistoryView, TasksView } from './components/operations-hub';
 import { CategoryAdminView } from './components/category-admin';
+import { mensagemErro } from '@/lib/errors';
 
 const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
+const agora = () => Date.now();
 
 // Medidas pedidas: a foto cabe em 350x350 e fica centralizada
 // numa moldura branca de 420x420.
@@ -25,6 +27,42 @@ const CHAVE_SITES_IMAGENS = 'buscador-bling:sites-imagens';
 const CHAVE_LIMITE_CONSULTAS_IMAGENS = 'buscador-bling:limite-consultas-imagens';
 const SITES_IMAGENS_PADRAO = 'madeiramadeira.com.br';
 const LIMITE_CONSULTAS_IMAGENS_PADRAO = 3;
+
+interface ProdutoImportado {
+  codigo: string;
+  nome: string;
+  linha: number;
+}
+
+const codigoTemporario = (codigo: string) => /^TEMP-\d+$/i.test(codigo.trim());
+
+const analisarListaImportada = (texto: string) => {
+  const produtos: ProdutoImportado[] = [];
+  const linhasInvalidas: number[] = [];
+
+  texto.split(/\r?\n/).forEach((linhaOriginal, indice) => {
+    const linha = linhaOriginal.trim();
+    if (!linha) return;
+
+    const separador = linhaOriginal.includes('\t') ? '\t' : linhaOriginal.includes(';') ? ';' : '';
+    if (!separador) {
+      linhasInvalidas.push(indice + 1);
+      return;
+    }
+
+    const partes = linhaOriginal.split(separador);
+    const codigo = String(partes.shift() || '').trim();
+    const nome = partes.join(separador).trim();
+    if (!codigo || !nome || codigoTemporario(codigo)) {
+      linhasInvalidas.push(indice + 1);
+      return;
+    }
+
+    produtos.push({ codigo, nome, linha: indice + 1 });
+  });
+
+  return { produtos, linhasInvalidas };
+};
 
 // Cada lote vira um ZIP separado. Um ZIP único com centenas de produtos
 // fica grande demais para o navegador montar de uma vez só.
@@ -69,6 +107,13 @@ interface ProdutoComMedidas {
   altura?: unknown;
   profundidade?: unknown;
 }
+
+type RespostaProcessamento = Partial<ProdutoResultado> & {
+  cotaExcedida?: boolean;
+  esperarSegundos?: number;
+  imagens?: string[];
+  error?: string;
+};
 
 const temMedidasCompletas = (produto: ProdutoComMedidas) =>
   !semInformacao(produto?.peso) &&
@@ -117,7 +162,7 @@ const selecionarReferencias = (nome: string, codigo: string, produtos: ProdutoCo
 const nomeSeguro = (texto: string) =>
   texto.replace(/[\\/:*?"<>|]/g, '-').trim() || 'sem-codigo';
 
-const deuErro = (produto: ProdutoResultado) => produtoComErro(produto);
+const deuErro = (produto: Partial<ProdutoResultado>) => produtoComErro(produto);
 const temFichaCompleta = (produto: ProdutoResultado | undefined) => Boolean(
   produto && !semInformacao(produto.curta) && temMedidasCompletas(produto)
 );
@@ -183,8 +228,8 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 
   try {
     resposta = await fetch(`/api/imagem?url=${encodeURIComponent(url)}`);
-  } catch (e: any) {
-    return { blob: null, erro: `falha de rede: ${e.message}` };
+  } catch (erro: unknown) {
+    return { blob: null, erro: `falha de rede: ${mensagemErro(erro)}` };
   }
 
   if (!resposta.ok) {
@@ -247,27 +292,27 @@ export default function Home() {
       setLimiteConsultasImagens(Math.min(12, Math.max(1,
         Number(localStorage.getItem(CHAVE_LIMITE_CONSULTAS_IMAGENS)) || LIMITE_CONSULTAS_IMAGENS_PADRAO
       )));
-    });
 
-    try {
-      const salvo = localStorage.getItem(CHAVE_HISTORICO);
-      if (salvo) {
-        const dados = JSON.parse(salvo);
-        if (Array.isArray(dados) && dados.length > 0) {
-          setResultados(dados);
-          fetch('/api/historico', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ produtos: dados }),
-          }).catch(() => null);
-          setAviso(
-            `${dados.length} produto(s) recuperados da sessão anterior. ` +
-            `Você pode baixar o ZIP direto, sem reprocessar.`
-          );
+      try {
+        const salvo = localStorage.getItem(CHAVE_HISTORICO);
+        if (salvo) {
+          const dados: unknown = JSON.parse(salvo);
+          if (Array.isArray(dados) && dados.length > 0) {
+            setResultados(dados as ProdutoResultado[]);
+            fetch('/api/historico', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ produtos: dados }),
+            }).catch(() => null);
+            setAviso(
+              `${dados.length} produto(s) recuperados da sessão anterior. ` +
+              `Você pode baixar o ZIP direto, sem reprocessar.`
+            );
+          }
         }
+      } catch {
+        // Histórico corrompido não deve travar a página.
       }
-    } catch {
-      // Histórico corrompido não deve travar a página.
-    }
+    });
     return () => cancelAnimationFrame(quadro);
   }, []);
 
@@ -283,14 +328,17 @@ export default function Home() {
       .then(dados => setTelegram({ configurado: dados.configurado === true }))
       .catch(() => {});
 
-    const situacao = new URLSearchParams(window.location.search).get('bling');
-    if (situacao === 'conectado') {
-      setAviso('Conectado ao Bling.');
-      window.history.replaceState({}, '', window.location.pathname);
-    } else if (situacao) {
-      setAviso(`Não deu para conectar ao Bling — ${situacao}`);
-      window.history.replaceState({}, '', window.location.pathname);
-    }
+    const quadro = requestAnimationFrame(() => {
+      const situacao = new URLSearchParams(window.location.search).get('bling');
+      if (situacao === 'conectado') {
+        setAviso('Conectado ao Bling.');
+        window.history.replaceState({}, '', window.location.pathname);
+      } else if (situacao) {
+        setAviso(`Não deu para conectar ao Bling — ${situacao}`);
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    });
+    return () => cancelAnimationFrame(quadro);
   }, []);
 
   const desconectarBling = async () => {
@@ -340,6 +388,14 @@ export default function Home() {
   // Percorre os produtos mandando (ou simulando) para o Bling.
   const mandarParaBling = async (produtos: ProdutoResultado[], simular: boolean) => {
     if (produtos.length === 0) return;
+    const temporarios = produtos.filter(produto => codigoTemporario(produto.codigo));
+    if (temporarios.length > 0) {
+      setAviso(
+        `Envio bloqueado: ${temporarios.length} produto(s) estão sem o código real do Bling. ` +
+        'Volte à importação e cole duas colunas: código e nome.'
+      );
+      return;
+    }
 
     setEnviandoBling(true);
     pararRef.current = false;
@@ -347,7 +403,7 @@ export default function Home() {
     setAviso('');
 
     const saidas: ResultadoEnvio[] = [];
-    const inicioEnvio = Date.now();
+    const inicioEnvio = agora();
 
     for (let i = 0; i < produtos.length; i++) {
       if (pararRef.current) {
@@ -408,7 +464,7 @@ export default function Home() {
         const tipo = pararRef.current ? 'envio_interrompido' : falhos > 0 ? 'envio_com_alertas' : 'envio_concluido';
         fetch('/api/notificacao/telegram', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tipo, total: produtos.length, enviados: okey, erros: falhos, processados: saidas.length, duracaoSegundos: Math.round((Date.now() - inicioEnvio) / 1000), codigosErro: saidas.filter(s => s.erro).slice(0, 8).map(s => s.codigo) }),
+          body: JSON.stringify({ tipo, total: produtos.length, enviados: okey, erros: falhos, processados: saidas.length, duracaoSegundos: Math.round((agora() - inicioEnvio) / 1000), codigosErro: saidas.filter(s => s.erro).slice(0, 8).map(s => s.codigo) }),
         }).catch(() => null);
       }
     }
@@ -710,42 +766,54 @@ export default function Home() {
   };
 
   const iniciarProcessamento = async () => {
-    const linhas = textoColado.trim().split('\n');
-    if (linhas.length === 0 || linhas[0] === "") return;
+    const importacao = analisarListaImportada(textoColado);
+    const itens = importacao.produtos;
+    if (itens.length === 0 || importacao.linhasInvalidas.length > 0) {
+      setAviso(
+        importacao.linhasInvalidas.length > 0
+          ? `Corrija as linhas ${importacao.linhasInvalidas.join(', ')}. Cada linha precisa ter código e nome separados por TAB ou ponto e vírgula.`
+          : 'Cole pelo menos um produto com código e nome.'
+      );
+      return;
+    }
 
     // Descobre antes de começar se existe alguma ficha que realmente precisa
     // do Gemini. Lotes que só precisam de imagens podem continuar com o Serper.
-    const porCodigo = new Map<string, ProdutoResultado>(resultados.map(r => [r.codigo, r]));
-    const precisaGemini = linhas.some((linha, indice) => {
-      const partes = linha.split('\t');
-      const codigo = partes.length > 1 ? partes[0] : `TEMP-${indice}`;
-      return !temFichaCompleta(porCodigo.get(codigo));
+    const porCodigo = new Map<string, ProdutoResultado>(
+      resultados.filter(resultado => !codigoTemporario(resultado.codigo)).map(r => [r.codigo, r])
+    );
+    itens.forEach((item, indice) => {
+      const temporario = resultados.find(resultado =>
+        resultado.codigo.toUpperCase() === `TEMP-${indice}`
+      );
+      if (temporario && !porCodigo.has(item.codigo)) {
+        porCodigo.set(item.codigo, { ...temporario, codigo: item.codigo, nome: item.nome });
+      }
     });
+    const precisaGemini = itens.some(item => !temFichaCompleta(porCodigo.get(item.codigo)));
     if (precisaGemini && !apiKeyGemini) {
       alert("Insira uma chave válida do Gemini para corrigir as fichas incompletas.");
       return;
     }
 
-    const inicioProcessamento = Date.now();
+    const inicioProcessamento = agora();
     setProcessando(true);
     setAviso('');
     pararRef.current = false;
-    setProgresso({ atual: 0, total: linhas.length });
+    setProgresso({ atual: 0, total: itens.length });
 
     // Mantém o que já existe e vai atualizando por código.
     let pulados = 0;
     let cotaAcabou = false;
     let chaveGeminiInvalida = false;
 
-    for (let i = 0; i < linhas.length; i++) {
+    for (let i = 0; i < itens.length; i++) {
       if (pararRef.current) {
-        setLog(`Interrompido em ${i} de ${linhas.length}. O que já foi feito está salvo.`);
+        setLog(`Interrompido em ${i} de ${itens.length}. O que já foi feito está salvo.`);
         break;
       }
 
-      const partes = linhas[i].split('\t');
-      const codigo = partes.length > 1 ? partes[0] : `TEMP-${i}`;
-      const nome = partes.length > 1 ? partes[1] : partes[0];
+      const { codigo, nome } = itens[i];
 
       // Produtos completos são pulados. Os antigos que vieram sem peso,
       // medidas ou foto voltam ao processamento e preservam o que já está pronto.
@@ -756,7 +824,7 @@ export default function Home() {
       const fichaAnteriorCompleta = temFichaCompleta(anterior);
       if (fichaAnteriorCompleta && temImagemAnterior) {
         pulados++;
-        setProgresso({ atual: i + 1, total: linhas.length });
+        setProgresso({ atual: i + 1, total: itens.length });
         continue;
       }
       const buscarSomenteImagens = fichaAnteriorCompleta && !temImagemAnterior;
@@ -766,12 +834,12 @@ export default function Home() {
       // Se a cota estourar, espera o tempo que o Google pediu e tenta o
       // mesmo produto de novo. Três recusas seguidas significam que a cota
       // do dia acabou, e aí não adianta insistir.
-      let dados: any = null;
+      let dados: RespostaProcessamento | null = null;
 
       for (let volta = 1; volta <= 3; volta++) {
         if (pararRef.current) break;
 
-        setLog(`[${i + 1}/${linhas.length}] Processando: ${nome}`);
+        setLog(`[${i + 1}/${itens.length}] Processando: ${nome}`);
 
         try {
           const res = await fetch('/api/processar', {
@@ -795,9 +863,12 @@ export default function Home() {
               buscarImagens: !temImagemAnterior,
             })
           });
-          dados = await res.json();
-        } catch (e: any) {
-          setLog(`Erro de rede em ${nome}: ${e.message}`);
+          const resposta: unknown = await res.json();
+          dados = resposta && typeof resposta === 'object' && !Array.isArray(resposta)
+            ? resposta as RespostaProcessamento
+            : { error: 'A API respondeu em um formato inválido.' };
+        } catch (erro: unknown) {
+          setLog(`Erro de rede em ${nome}: ${mensagemErro(erro)}`);
           break;
         }
 
@@ -838,7 +909,7 @@ export default function Home() {
           'amanhã, colar a mesma lista e clicar em Iniciar — os prontos serão pulados ' +
           'e só os que faltam vão ser processados.'
         );
-        setLog(`Parado em ${i} de ${linhas.length} por falta de cota. Nada foi perdido.`);
+        setLog(`Parado em ${i} de ${itens.length} por falta de cota. Nada foi perdido.`);
         break;
       }
 
@@ -877,13 +948,15 @@ export default function Home() {
         setResultados(lista);
         salvarHistorico(lista);
       }
-      setProgresso({ atual: i + 1, total: linhas.length });
+      setProgresso({ atual: i + 1, total: itens.length });
 
       // Respiro entre produtos para não estourar o limite por minuto da IA.
-      if (i < linhas.length - 1) await espera(1500);
+      if (i < itens.length - 1) await espera(1500);
     }
 
     const lista = [...porCodigo.values()];
+    setResultados(lista);
+    salvarHistorico(lista);
     const comErro = lista.filter(deuErro).length;
     const semImagem = lista.filter(r => !r.img1).length;
 
@@ -907,7 +980,7 @@ export default function Home() {
             erros: comErro,
             semImagem,
             pulados,
-            duracaoSegundos: Math.round((Date.now() - inicioProcessamento) / 1000),
+            duracaoSegundos: Math.round((agora() - inicioProcessamento) / 1000),
           }),
         });
         if (!respostaNotificacao.ok) {
@@ -1067,9 +1140,10 @@ export default function Home() {
     router.refresh();
   };
 
-  const linhasImportadas = textoColado.trim()
-    ? textoColado.trim().split('\n').filter(linha => linha.trim()).length
-    : 0;
+  const importacaoAtual = analisarListaImportada(textoColado);
+  const linhasImportadas = importacaoAtual.produtos.length;
+  const linhasInvalidas = importacaoAtual.linhasInvalidas;
+  const resultadosTemporarios = resultados.filter(produto => codigoTemporario(produto.codigo)).length;
   const comErro = resultados.filter(deuErro).length;
   const semImagem = resultados.filter(produtoSemFotos).length;
   const medidasParaConferir = resultados.filter(produto =>
@@ -1085,6 +1159,13 @@ export default function Home() {
   };
 
   const aprovarLote = () => {
+    if (resultadosTemporarios > 0) {
+      setAviso(
+        `Aprovação bloqueada: ${resultadosTemporarios} produto(s) estão com código temporário. ` +
+        'Volte à importação e informe o código real do Bling.'
+      );
+      return;
+    }
     setLoteAprovado(true);
     setEnvios([]);
     setAviso(`${resultados.length} produto(s) aprovados e liberados para simulação no Bling.`);
@@ -1365,12 +1446,21 @@ export default function Home() {
                     className="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 p-4 font-mono text-sm leading-6 text-slate-900 outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
                   />
                 </label>
+                {linhasInvalidas.length > 0 && (
+                  <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                    <p className="font-bold">Formato inválido nas linhas {linhasInvalidas.join(', ')}.</p>
+                    <p className="mt-1">Cole o código real do Bling na primeira coluna e o nome na segunda. Use TAB (copiando duas colunas do Excel) ou ponto e vírgula.</p>
+                  </div>
+                )}
               </div>
 
               <aside className="h-fit rounded-2xl bg-slate-950 p-6 text-white shadow-sm">
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-300">Resumo da importação</p>
                 <p className="mt-5 text-4xl font-black">{linhasImportadas}</p>
-                <p className="mt-1 text-sm text-slate-300">produtos identificados</p>
+                <p className="mt-1 text-sm text-slate-300">produtos válidos identificados</p>
+                {linhasInvalidas.length > 0 && (
+                  <p className="mt-2 text-sm font-bold text-red-300">{linhasInvalidas.length} linha(s) precisam de correção</p>
+                )}
                 <div className="my-5 h-px bg-slate-800" />
                 <ul className="space-y-3 text-sm text-slate-300">
                   <li className="flex gap-2">
@@ -1397,13 +1487,16 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => setEtapaAtual(2)}
-                  disabled={!apiKeyGemini || linhasImportadas === 0}
+                  disabled={!apiKeyGemini || linhasImportadas === 0 || linhasInvalidas.length > 0}
                   className="mt-6 w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Continuar para processar
                 </button>
                 {!apiKeyGemini && linhasImportadas > 0 && (
                   <p className="mt-3 text-xs text-amber-300">Configure a chave do Gemini para continuar.</p>
+                )}
+                {linhasInvalidas.length > 0 && (
+                  <p className="mt-3 text-xs text-red-300">Corrija o formato das linhas indicadas para continuar.</p>
                 )}
               </aside>
             </div>
@@ -1631,11 +1724,17 @@ export default function Home() {
                 </div>
               )}
 
+              {resultadosTemporarios > 0 && (
+                <div className="mt-5 rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900">
+                  Existem {resultadosTemporarios} produto(s) com código temporário. Eles não podem ser procurados no Bling. Volte à importação, cole o código real na primeira coluna e processe novamente.
+                </div>
+              )}
+
               <div className="mt-6 flex flex-wrap justify-end gap-3">
                 <button type="button" onClick={() => setEtapaAtual(3)} className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">
                   Voltar e revisar
                 </button>
-                <button type="button" onClick={aprovarLote} className="rounded-xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white hover:bg-emerald-700">
+                <button type="button" onClick={aprovarLote} disabled={resultadosTemporarios > 0} className="rounded-xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
                   Aprovar lote e continuar
                 </button>
               </div>
@@ -1657,6 +1756,12 @@ export default function Home() {
                 Lote aprovado • {resultados.length} produtos
               </span>
             </div>
+
+            {resultadosTemporarios > 0 && (
+              <div className="mb-5 rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900">
+                Envio bloqueado: {resultadosTemporarios} produto(s) estão sem o código real do Bling. Volte à etapa de importação e substitua os itens TEMP.
+              </div>
+            )}
 
             <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
               <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-6">
@@ -1788,7 +1893,7 @@ export default function Home() {
                           {envio.corpo.descricaoComplementar}
                         </div>
                       )}
-                      {envio.corpo && (
+                      {Boolean(envio.corpo) && (
                         <details className="mt-3">
                           <summary className="cursor-pointer text-xs font-semibold text-blue-600">Ver dados da simulação</summary>
                           <pre className="mt-2 overflow-x-auto rounded-lg bg-slate-50 p-3 text-[11px] text-slate-800">
