@@ -42,10 +42,10 @@ const CAMPOS_COM_DIAGNOSTICO: (keyof ProdutoResultado)[] = [
   'justificativaMedidas', 'fonteMedidas',
 ];
 
-export const produtoSemFotos = (produto: ProdutoResultado) =>
+export const produtoSemFotos = (produto: Partial<ProdutoResultado>) =>
   CAMPOS_IMAGEM.every(campo => !String(produto[campo] || '').trim());
 
-export const produtoComErro = (produto: ProdutoResultado) =>
+export const produtoComErro = (produto: Partial<ProdutoResultado>) =>
   CAMPOS_COM_DIAGNOSTICO.some(campo => {
     const valor = String(produto[campo] || '').trim().toUpperCase();
     return /^(ERRO|FALHA)\b/.test(valor) ||

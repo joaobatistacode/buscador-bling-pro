@@ -1,5 +1,6 @@
 import { BLING_AUTORIZAR, credenciais } from '../sessao';
 import { naoAutorizado, temAcesso } from '@/lib/acesso';
+import { mensagemErro } from '@/lib/errors';
 
 // Manda o usuário para a tela de autorização do Bling. O Bling volta para
 // /api/bling/callback com o código.
@@ -8,8 +9,8 @@ export async function GET(request: Request) {
   let id: string;
   try {
     ({ id } = credenciais());
-  } catch (e: any) {
-    return new Response(e.message, { status: 500 });
+  } catch (erro: unknown) {
+    return new Response(mensagemErro(erro), { status: 500 });
   }
 
   const origem = new URL(request.url).origin;

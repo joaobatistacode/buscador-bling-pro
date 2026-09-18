@@ -8,8 +8,10 @@ import { WorkflowStepper, type EtapaFluxo } from './components/workflow-stepper'
 import { produtoComErro, produtoSemFotos, type CampoImagem, type ProdutoResultado } from './produtos';
 import { DashboardView, HistoryView, TasksView } from './components/operations-hub';
 import { CategoryAdminView } from './components/category-admin';
+import { mensagemErro } from '@/lib/errors';
 
 const espera = (ms: number) => new Promise(r => setTimeout(r, ms));
+const agora = () => Date.now();
 
 // Medidas pedidas: a foto cabe em 350x350 e fica centralizada
 // numa moldura branca de 420x420.
@@ -70,6 +72,13 @@ interface ProdutoComMedidas {
   profundidade?: unknown;
 }
 
+type RespostaProcessamento = Partial<ProdutoResultado> & {
+  cotaExcedida?: boolean;
+  esperarSegundos?: number;
+  imagens?: string[];
+  error?: string;
+};
+
 const temMedidasCompletas = (produto: ProdutoComMedidas) =>
   !semInformacao(produto?.peso) &&
   !semInformacao(produto?.largura) &&
@@ -117,7 +126,7 @@ const selecionarReferencias = (nome: string, codigo: string, produtos: ProdutoCo
 const nomeSeguro = (texto: string) =>
   texto.replace(/[\\/:*?"<>|]/g, '-').trim() || 'sem-codigo';
 
-const deuErro = (produto: ProdutoResultado) => produtoComErro(produto);
+const deuErro = (produto: Partial<ProdutoResultado>) => produtoComErro(produto);
 const temFichaCompleta = (produto: ProdutoResultado | undefined) => Boolean(
   produto && !semInformacao(produto.curta) && temMedidasCompletas(produto)
 );
@@ -183,8 +192,8 @@ async function montarImagem(url: string): Promise<{ blob: Blob | null; erro?: st
 
   try {
     resposta = await fetch(`/api/imagem?url=${encodeURIComponent(url)}`);
-  } catch (e: any) {
-    return { blob: null, erro: `falha de rede: ${e.message}` };
+  } catch (erro: unknown) {
+    return { blob: null, erro: `falha de rede: ${mensagemErro(erro)}` };
   }
 
   if (!resposta.ok) {
@@ -247,27 +256,27 @@ export default function Home() {
       setLimiteConsultasImagens(Math.min(12, Math.max(1,
         Number(localStorage.getItem(CHAVE_LIMITE_CONSULTAS_IMAGENS)) || LIMITE_CONSULTAS_IMAGENS_PADRAO
       )));
-    });
 
-    try {
-      const salvo = localStorage.getItem(CHAVE_HISTORICO);
-      if (salvo) {
-        const dados = JSON.parse(salvo);
-        if (Array.isArray(dados) && dados.length > 0) {
-          setResultados(dados);
-          fetch('/api/historico', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ produtos: dados }),
-          }).catch(() => null);
-          setAviso(
-            `${dados.length} produto(s) recuperados da sessão anterior. ` +
-            `Você pode baixar o ZIP direto, sem reprocessar.`
-          );
+      try {
+        const salvo = localStorage.getItem(CHAVE_HISTORICO);
+        if (salvo) {
+          const dados: unknown = JSON.parse(salvo);
+          if (Array.isArray(dados) && dados.length > 0) {
+            setResultados(dados as ProdutoResultado[]);
+            fetch('/api/historico', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ produtos: dados }),
+            }).catch(() => null);
+            setAviso(
+              `${dados.length} produto(s) recuperados da sessão anterior. ` +
+              `Você pode baixar o ZIP direto, sem reprocessar.`
+            );
+          }
         }
+      } catch {
+        // Histórico corrompido não deve travar a página.
       }
-    } catch {
-      // Histórico corrompido não deve travar a página.
-    }
+    });
     return () => cancelAnimationFrame(quadro);
   }, []);
 
@@ -283,14 +292,17 @@ export default function Home() {
       .then(dados => setTelegram({ configurado: dados.configurado === true }))
       .catch(() => {});
 
-    const situacao = new URLSearchParams(window.location.search).get('bling');
-    if (situacao === 'conectado') {
-      setAviso('Conectado ao Bling.');
-      window.history.replaceState({}, '', window.location.pathname);
-    } else if (situacao) {
-      setAviso(`Não deu para conectar ao Bling — ${situacao}`);
-      window.history.replaceState({}, '', window.location.pathname);
-    }
+    const quadro = requestAnimationFrame(() => {
+      const situacao = new URLSearchParams(window.location.search).get('bling');
+      if (situacao === 'conectado') {
+        setAviso('Conectado ao Bling.');
+        window.history.replaceState({}, '', window.location.pathname);
+      } else if (situacao) {
+        setAviso(`Não deu para conectar ao Bling — ${situacao}`);
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    });
+    return () => cancelAnimationFrame(quadro);
   }, []);
 
   const desconectarBling = async () => {
@@ -347,7 +359,7 @@ export default function Home() {
     setAviso('');
 
     const saidas: ResultadoEnvio[] = [];
-    const inicioEnvio = Date.now();
+    const inicioEnvio = agora();
 
     for (let i = 0; i < produtos.length; i++) {
       if (pararRef.current) {
@@ -408,7 +420,7 @@ export default function Home() {
         const tipo = pararRef.current ? 'envio_interrompido' : falhos > 0 ? 'envio_com_alertas' : 'envio_concluido';
         fetch('/api/notificacao/telegram', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tipo, total: produtos.length, enviados: okey, erros: falhos, processados: saidas.length, duracaoSegundos: Math.round((Date.now() - inicioEnvio) / 1000), codigosErro: saidas.filter(s => s.erro).slice(0, 8).map(s => s.codigo) }),
+          body: JSON.stringify({ tipo, total: produtos.length, enviados: okey, erros: falhos, processados: saidas.length, duracaoSegundos: Math.round((agora() - inicioEnvio) / 1000), codigosErro: saidas.filter(s => s.erro).slice(0, 8).map(s => s.codigo) }),
         }).catch(() => null);
       }
     }
@@ -726,7 +738,7 @@ export default function Home() {
       return;
     }
 
-    const inicioProcessamento = Date.now();
+    const inicioProcessamento = agora();
     setProcessando(true);
     setAviso('');
     pararRef.current = false;
@@ -766,7 +778,7 @@ export default function Home() {
       // Se a cota estourar, espera o tempo que o Google pediu e tenta o
       // mesmo produto de novo. Três recusas seguidas significam que a cota
       // do dia acabou, e aí não adianta insistir.
-      let dados: any = null;
+      let dados: RespostaProcessamento | null = null;
 
       for (let volta = 1; volta <= 3; volta++) {
         if (pararRef.current) break;
@@ -795,9 +807,12 @@ export default function Home() {
               buscarImagens: !temImagemAnterior,
             })
           });
-          dados = await res.json();
-        } catch (e: any) {
-          setLog(`Erro de rede em ${nome}: ${e.message}`);
+          const resposta: unknown = await res.json();
+          dados = resposta && typeof resposta === 'object' && !Array.isArray(resposta)
+            ? resposta as RespostaProcessamento
+            : { error: 'A API respondeu em um formato inválido.' };
+        } catch (erro: unknown) {
+          setLog(`Erro de rede em ${nome}: ${mensagemErro(erro)}`);
           break;
         }
 
@@ -907,7 +922,7 @@ export default function Home() {
             erros: comErro,
             semImagem,
             pulados,
-            duracaoSegundos: Math.round((Date.now() - inicioProcessamento) / 1000),
+            duracaoSegundos: Math.round((agora() - inicioProcessamento) / 1000),
           }),
         });
         if (!respostaNotificacao.ok) {
@@ -1788,7 +1803,7 @@ export default function Home() {
                           {envio.corpo.descricaoComplementar}
                         </div>
                       )}
-                      {envio.corpo && (
+                      {Boolean(envio.corpo) && (
                         <details className="mt-3">
                           <summary className="cursor-pointer text-xs font-semibold text-blue-600">Ver dados da simulação</summary>
                           <pre className="mt-2 overflow-x-auto rounded-lg bg-slate-50 p-3 text-[11px] text-slate-800">

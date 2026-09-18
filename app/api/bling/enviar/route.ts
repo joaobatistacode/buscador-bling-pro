@@ -1,5 +1,13 @@
 import { BLING_API, tokenValido } from '../sessao';
 import { lerCorpoLimitado, naoAutorizado, origemInvalida, origemPermitida, temAcesso } from '@/lib/acesso';
+import { mensagemErro } from '@/lib/errors';
+
+type ObjetoJson = Record<string, unknown>;
+
+const comoObjeto = (valor: unknown): ObjetoJson =>
+  valor && typeof valor === 'object' && !Array.isArray(valor)
+    ? valor as ObjetoJson
+    : {};
 
 // Campos que o PUT de produto aceita. O PUT do Bling substitui o produto
 // inteiro, então precisamos reenviar o que já existe — mas só o que ele
@@ -28,30 +36,30 @@ const limitarDescricaoCurta = (valor: unknown) => {
   return `${base.replace(/[,:;\-]+$/, '')}…`;
 };
 
-const vazio = (valor: any) =>
+const vazio = (valor: unknown) =>
   valor === null || valor === undefined || valor === '' || valor === 0;
 
-const semInformacao = (texto: any) => {
+const semInformacao = (texto: unknown) => {
   const t = String(texto ?? '').trim();
   return !t || t.toUpperCase().includes('NÃO INFORMADO') || t.startsWith('Erro IA:');
 };
 
-const linkDaImagem = (imagem: any): string => {
+const linkDaImagem = (imagem: unknown): string => {
   if (typeof imagem === 'string') return imagem.trim();
-  if (!imagem || typeof imagem !== 'object') return '';
+  const objeto = comoObjeto(imagem);
   return String(
-    imagem.link ?? imagem.url ?? imagem.linkOriginal ?? imagem.urlOriginal ??
-    imagem.imagemURL ?? imagem.urlImagem ?? imagem.linkMiniatura ?? ''
+    objeto.link ?? objeto.url ?? objeto.linkOriginal ?? objeto.urlOriginal ??
+    objeto.imagemURL ?? objeto.urlImagem ?? objeto.linkMiniatura ?? ''
   ).trim();
 };
 
 // O PUT substitui o produto. Se o Bling já tem mídia, cada imagem precisa ser
 // convertida novamente para o campo gravável `imagensURL`; caso contrário o
 // produto é bloqueado antes do envio para nunca apagar fotos silenciosamente.
-function imagensAtuaisDoBling(produto: any) {
-  const midia = produto?.midia?.imagens;
-  const lista = [midia?.externas, midia?.internas, midia?.imagensURL]
-    .find(valor => Array.isArray(valor) && valor.length > 0) as any[] | undefined;
+function imagensAtuaisDoBling(produto: unknown) {
+  const midia = comoObjeto(comoObjeto(comoObjeto(produto).midia).imagens);
+  const lista = [midia.externas, midia.internas, midia.imagensURL]
+    .find((valor): valor is unknown[] => Array.isArray(valor) && valor.length > 0);
   if (!lista) return { temImagens: false, links: [] as string[], incompleta: false };
 
   const extraidos = lista.map(linkDaImagem);
@@ -63,7 +71,7 @@ function imagensAtuaisDoBling(produto: any) {
 }
 
 // "250 g" -> 0.25 | "1,5 kg" -> 1.5 | "2kg" -> 2 | texto solto -> null
-function paraQuilos(texto: any): number | null {
+function paraQuilos(texto: unknown): number | null {
   if (semInformacao(texto)) return null;
 
   const limpo = String(texto).toLowerCase().replace(',', '.');
@@ -84,7 +92,7 @@ function paraQuilos(texto: any): number | null {
 }
 
 // Converte para centímetros. Devolve null quando a unidade não está clara.
-function paraCentimetros(texto: any): number | null {
+function paraCentimetros(texto: unknown): number | null {
   if (semInformacao(texto)) return null;
 
   const limpo = String(texto).toLowerCase().replace(',', '.');
@@ -127,13 +135,16 @@ async function chamarBling(caminho: string, token: string, init?: RequestInit) {
   return { ok: res.ok, status: res.status, corpo };
 }
 
-function descreveErro(corpo: any, status: number): string {
-  const erro = corpo?.error;
-  if (!erro) return `HTTP ${status}`;
+function descreveErro(corpo: unknown, status: number): string {
+  const erro = comoObjeto(comoObjeto(corpo).error);
+  if (Object.keys(erro).length === 0) return `HTTP ${status}`;
 
-  const campos = erro.fields
-    ?.map((c: any) => `${c.element || c.field || '?'}: ${c.msg || c.message}`)
-    .join(' | ');
+  const campos = Array.isArray(erro.fields)
+    ? erro.fields.map((campo) => {
+        const item = comoObjeto(campo);
+        return `${item.element || item.field || '?'}: ${item.msg || item.message || '?'}`;
+      }).join(' | ')
+    : '';
 
   return [erro.description || erro.message || `HTTP ${status}`, campos]
     .filter(Boolean)
@@ -152,8 +163,8 @@ export async function POST(request: Request) {
   let token: string | null;
   try {
     token = await tokenValido();
-  } catch (e: any) {
-    return Response.json({ erro: e.message }, { status: 401 });
+  } catch (erro: unknown) {
+    return Response.json({ erro: mensagemErro(erro) }, { status: 401 });
   }
 
   if (!token) {
@@ -199,7 +210,9 @@ export async function POST(request: Request) {
   }
 
   const achados = busca.corpo?.data || [];
-  const exato = achados.filter((p: any) => String(p.codigo) === String(codigo));
+  const exato = Array.isArray(achados)
+    ? achados.filter((produto: unknown) => String(comoObjeto(produto).codigo) === String(codigo))
+    : [];
 
   if (exato.length === 0) {
     return Response.json(
@@ -214,7 +227,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const idProduto = exato[0].id;
+  const idProduto = comoObjeto(exato[0]).id;
 
   // 2. Lê o produto completo, que é a base do PUT.
   const leitura = await chamarBling(`/produtos/${idProduto}`, token);
@@ -231,7 +244,7 @@ export async function POST(request: Request) {
   }
 
   // 3. Copia o que já existe e sobrepõe apenas o que deve mudar.
-  const corpo: any = {};
+  const corpo: ObjetoJson = {};
   for (const campo of CAMPOS_COPIAVEIS) {
     if (atual[campo] !== undefined && atual[campo] !== null) {
       corpo[campo] = atual[campo];
@@ -255,7 +268,7 @@ export async function POST(request: Request) {
 
   // Ficha: por padrão só preenche o que está vazio no Bling, para não
   // apagar dado que você já conferiu na mão.
-  const podeGravar = (campo: string, valorAtual: any) => {
+  const podeGravar = (campo: string, valorAtual: unknown) => {
     if (sobrescrever || vazio(valorAtual)) return true;
     ignorados.push(`${campo} (já preenchido no Bling)`);
     return false;
