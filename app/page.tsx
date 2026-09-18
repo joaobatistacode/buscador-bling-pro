@@ -28,6 +28,42 @@ const CHAVE_LIMITE_CONSULTAS_IMAGENS = 'buscador-bling:limite-consultas-imagens'
 const SITES_IMAGENS_PADRAO = 'madeiramadeira.com.br';
 const LIMITE_CONSULTAS_IMAGENS_PADRAO = 3;
 
+interface ProdutoImportado {
+  codigo: string;
+  nome: string;
+  linha: number;
+}
+
+const codigoTemporario = (codigo: string) => /^TEMP-\d+$/i.test(codigo.trim());
+
+const analisarListaImportada = (texto: string) => {
+  const produtos: ProdutoImportado[] = [];
+  const linhasInvalidas: number[] = [];
+
+  texto.split(/\r?\n/).forEach((linhaOriginal, indice) => {
+    const linha = linhaOriginal.trim();
+    if (!linha) return;
+
+    const separador = linhaOriginal.includes('\t') ? '\t' : linhaOriginal.includes(';') ? ';' : '';
+    if (!separador) {
+      linhasInvalidas.push(indice + 1);
+      return;
+    }
+
+    const partes = linhaOriginal.split(separador);
+    const codigo = String(partes.shift() || '').trim();
+    const nome = partes.join(separador).trim();
+    if (!codigo || !nome || codigoTemporario(codigo)) {
+      linhasInvalidas.push(indice + 1);
+      return;
+    }
+
+    produtos.push({ codigo, nome, linha: indice + 1 });
+  });
+
+  return { produtos, linhasInvalidas };
+};
+
 // Cada lote vira um ZIP separado. Um ZIP único com centenas de produtos
 // fica grande demais para o navegador montar de uma vez só.
 const PADRAO_POR_ZIP = 100;
@@ -352,6 +388,14 @@ export default function Home() {
   // Percorre os produtos mandando (ou simulando) para o Bling.
   const mandarParaBling = async (produtos: ProdutoResultado[], simular: boolean) => {
     if (produtos.length === 0) return;
+    const temporarios = produtos.filter(produto => codigoTemporario(produto.codigo));
+    if (temporarios.length > 0) {
+      setAviso(
+        `Envio bloqueado: ${temporarios.length} produto(s) estão sem o código real do Bling. ` +
+        'Volte à importação e cole duas colunas: código e nome.'
+      );
+      return;
+    }
 
     setEnviandoBling(true);
     pararRef.current = false;
@@ -722,17 +766,23 @@ export default function Home() {
   };
 
   const iniciarProcessamento = async () => {
-    const linhas = textoColado.trim().split('\n');
-    if (linhas.length === 0 || linhas[0] === "") return;
+    const importacao = analisarListaImportada(textoColado);
+    const itens = importacao.produtos;
+    if (itens.length === 0 || importacao.linhasInvalidas.length > 0) {
+      setAviso(
+        importacao.linhasInvalidas.length > 0
+          ? `Corrija as linhas ${importacao.linhasInvalidas.join(', ')}. Cada linha precisa ter código e nome separados por TAB ou ponto e vírgula.`
+          : 'Cole pelo menos um produto com código e nome.'
+      );
+      return;
+    }
 
     // Descobre antes de começar se existe alguma ficha que realmente precisa
     // do Gemini. Lotes que só precisam de imagens podem continuar com o Serper.
-    const porCodigo = new Map<string, ProdutoResultado>(resultados.map(r => [r.codigo, r]));
-    const precisaGemini = linhas.some((linha, indice) => {
-      const partes = linha.split('\t');
-      const codigo = partes.length > 1 ? partes[0] : `TEMP-${indice}`;
-      return !temFichaCompleta(porCodigo.get(codigo));
-    });
+    const porCodigo = new Map<string, ProdutoResultado>(
+      resultados.filter(resultado => !codigoTemporario(resultado.codigo)).map(r => [r.codigo, r])
+    );
+    const precisaGemini = itens.some(item => !temFichaCompleta(porCodigo.get(item.codigo)));
     if (precisaGemini && !apiKeyGemini) {
       alert("Insira uma chave válida do Gemini para corrigir as fichas incompletas.");
       return;
@@ -742,22 +792,20 @@ export default function Home() {
     setProcessando(true);
     setAviso('');
     pararRef.current = false;
-    setProgresso({ atual: 0, total: linhas.length });
+    setProgresso({ atual: 0, total: itens.length });
 
     // Mantém o que já existe e vai atualizando por código.
     let pulados = 0;
     let cotaAcabou = false;
     let chaveGeminiInvalida = false;
 
-    for (let i = 0; i < linhas.length; i++) {
+    for (let i = 0; i < itens.length; i++) {
       if (pararRef.current) {
-        setLog(`Interrompido em ${i} de ${linhas.length}. O que já foi feito está salvo.`);
+        setLog(`Interrompido em ${i} de ${itens.length}. O que já foi feito está salvo.`);
         break;
       }
 
-      const partes = linhas[i].split('\t');
-      const codigo = partes.length > 1 ? partes[0] : `TEMP-${i}`;
-      const nome = partes.length > 1 ? partes[1] : partes[0];
+      const { codigo, nome } = itens[i];
 
       // Produtos completos são pulados. Os antigos que vieram sem peso,
       // medidas ou foto voltam ao processamento e preservam o que já está pronto.
@@ -768,7 +816,7 @@ export default function Home() {
       const fichaAnteriorCompleta = temFichaCompleta(anterior);
       if (fichaAnteriorCompleta && temImagemAnterior) {
         pulados++;
-        setProgresso({ atual: i + 1, total: linhas.length });
+        setProgresso({ atual: i + 1, total: itens.length });
         continue;
       }
       const buscarSomenteImagens = fichaAnteriorCompleta && !temImagemAnterior;
@@ -783,7 +831,7 @@ export default function Home() {
       for (let volta = 1; volta <= 3; volta++) {
         if (pararRef.current) break;
 
-        setLog(`[${i + 1}/${linhas.length}] Processando: ${nome}`);
+        setLog(`[${i + 1}/${itens.length}] Processando: ${nome}`);
 
         try {
           const res = await fetch('/api/processar', {
@@ -853,7 +901,7 @@ export default function Home() {
           'amanhã, colar a mesma lista e clicar em Iniciar — os prontos serão pulados ' +
           'e só os que faltam vão ser processados.'
         );
-        setLog(`Parado em ${i} de ${linhas.length} por falta de cota. Nada foi perdido.`);
+        setLog(`Parado em ${i} de ${itens.length} por falta de cota. Nada foi perdido.`);
         break;
       }
 
@@ -892,10 +940,10 @@ export default function Home() {
         setResultados(lista);
         salvarHistorico(lista);
       }
-      setProgresso({ atual: i + 1, total: linhas.length });
+      setProgresso({ atual: i + 1, total: itens.length });
 
       // Respiro entre produtos para não estourar o limite por minuto da IA.
-      if (i < linhas.length - 1) await espera(1500);
+      if (i < itens.length - 1) await espera(1500);
     }
 
     const lista = [...porCodigo.values()];
@@ -1082,9 +1130,10 @@ export default function Home() {
     router.refresh();
   };
 
-  const linhasImportadas = textoColado.trim()
-    ? textoColado.trim().split('\n').filter(linha => linha.trim()).length
-    : 0;
+  const importacaoAtual = analisarListaImportada(textoColado);
+  const linhasImportadas = importacaoAtual.produtos.length;
+  const linhasInvalidas = importacaoAtual.linhasInvalidas;
+  const resultadosTemporarios = resultados.filter(produto => codigoTemporario(produto.codigo)).length;
   const comErro = resultados.filter(deuErro).length;
   const semImagem = resultados.filter(produtoSemFotos).length;
   const medidasParaConferir = resultados.filter(produto =>
@@ -1100,6 +1149,13 @@ export default function Home() {
   };
 
   const aprovarLote = () => {
+    if (resultadosTemporarios > 0) {
+      setAviso(
+        `Aprovação bloqueada: ${resultadosTemporarios} produto(s) estão com código temporário. ` +
+        'Volte à importação e informe o código real do Bling.'
+      );
+      return;
+    }
     setLoteAprovado(true);
     setEnvios([]);
     setAviso(`${resultados.length} produto(s) aprovados e liberados para simulação no Bling.`);
@@ -1380,12 +1436,21 @@ export default function Home() {
                     className="mt-2 w-full rounded-xl border border-slate-300 bg-slate-50 p-4 font-mono text-sm leading-6 text-slate-900 outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
                   />
                 </label>
+                {linhasInvalidas.length > 0 && (
+                  <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                    <p className="font-bold">Formato inválido nas linhas {linhasInvalidas.join(', ')}.</p>
+                    <p className="mt-1">Cole o código real do Bling na primeira coluna e o nome na segunda. Use TAB (copiando duas colunas do Excel) ou ponto e vírgula.</p>
+                  </div>
+                )}
               </div>
 
               <aside className="h-fit rounded-2xl bg-slate-950 p-6 text-white shadow-sm">
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-300">Resumo da importação</p>
                 <p className="mt-5 text-4xl font-black">{linhasImportadas}</p>
-                <p className="mt-1 text-sm text-slate-300">produtos identificados</p>
+                <p className="mt-1 text-sm text-slate-300">produtos válidos identificados</p>
+                {linhasInvalidas.length > 0 && (
+                  <p className="mt-2 text-sm font-bold text-red-300">{linhasInvalidas.length} linha(s) precisam de correção</p>
+                )}
                 <div className="my-5 h-px bg-slate-800" />
                 <ul className="space-y-3 text-sm text-slate-300">
                   <li className="flex gap-2">
@@ -1412,13 +1477,16 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => setEtapaAtual(2)}
-                  disabled={!apiKeyGemini || linhasImportadas === 0}
+                  disabled={!apiKeyGemini || linhasImportadas === 0 || linhasInvalidas.length > 0}
                   className="mt-6 w-full rounded-xl bg-blue-600 px-4 py-3 font-bold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Continuar para processar
                 </button>
                 {!apiKeyGemini && linhasImportadas > 0 && (
                   <p className="mt-3 text-xs text-amber-300">Configure a chave do Gemini para continuar.</p>
+                )}
+                {linhasInvalidas.length > 0 && (
+                  <p className="mt-3 text-xs text-red-300">Corrija o formato das linhas indicadas para continuar.</p>
                 )}
               </aside>
             </div>
@@ -1646,11 +1714,17 @@ export default function Home() {
                 </div>
               )}
 
+              {resultadosTemporarios > 0 && (
+                <div className="mt-5 rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900">
+                  Existem {resultadosTemporarios} produto(s) com código temporário. Eles não podem ser procurados no Bling. Volte à importação, cole o código real na primeira coluna e processe novamente.
+                </div>
+              )}
+
               <div className="mt-6 flex flex-wrap justify-end gap-3">
                 <button type="button" onClick={() => setEtapaAtual(3)} className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">
                   Voltar e revisar
                 </button>
-                <button type="button" onClick={aprovarLote} className="rounded-xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white hover:bg-emerald-700">
+                <button type="button" onClick={aprovarLote} disabled={resultadosTemporarios > 0} className="rounded-xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
                   Aprovar lote e continuar
                 </button>
               </div>
@@ -1672,6 +1746,12 @@ export default function Home() {
                 Lote aprovado • {resultados.length} produtos
               </span>
             </div>
+
+            {resultadosTemporarios > 0 && (
+              <div className="mb-5 rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900">
+                Envio bloqueado: {resultadosTemporarios} produto(s) estão sem o código real do Bling. Volte à etapa de importação e substitua os itens TEMP.
+              </div>
+            )}
 
             <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
               <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-6">
