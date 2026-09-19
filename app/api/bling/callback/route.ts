@@ -1,6 +1,7 @@
 import { cookies } from 'next/headers';
 import { guardarSessao, pedirToken } from '../sessao';
 import { naoAutorizado, temAcesso } from '@/lib/acesso';
+import { mensagemErro } from '@/lib/errors';
 
 // Volta do Bling com o código de autorização. Troca por token e devolve o
 // usuário para a página inicial.
@@ -36,7 +37,7 @@ export async function GET(request: Request) {
     });
     await guardarSessao(sessao);
     return voltar('conectado');
-  } catch (e: any) {
-    return voltar(`erro: ${e.message}`);
+  } catch (erro: unknown) {
+    return voltar(`erro: ${mensagemErro(erro)}`);
   }
 }
