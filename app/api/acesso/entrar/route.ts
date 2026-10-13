@@ -16,8 +16,15 @@ export async function POST(request: Request) {
   if (!origemPermitida(request)) return origemInvalida();
 
   if (!acessoConfigurado()) {
+    const pendencias: string[] = [];
+    if (!process.env.APP_ACCESS_PASSWORD || process.env.APP_ACCESS_PASSWORD.length < 10) {
+      pendencias.push('APP_ACCESS_PASSWORD (mínimo de 10 caracteres)');
+    }
+    if (!process.env.APP_SESSION_SECRET || process.env.APP_SESSION_SECRET.length < 32) {
+      pendencias.push('APP_SESSION_SECRET (mínimo de 32 caracteres)');
+    }
     return Response.json(
-      { erro: 'O acesso ainda não foi configurado no ambiente.' },
+      { erro: `Configuração pendente na Vercel: ${pendencias.join(' e ')}.` },
       { status: 503 }
     );
   }
