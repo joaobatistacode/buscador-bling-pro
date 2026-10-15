@@ -421,6 +421,12 @@ export default function Home() {
 
       saidas.push(saida);
       setEnvios([...saidas]);
+
+      // O envio de cada produto faz mais de uma chamada ao Bling. Um pequeno
+      // intervalo evita rajadas no "Enviar todos" e reduz 429/502/504 da API.
+      if (i + 1 < produtos.length && !pararRef.current) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
     }
 
     setEnviandoBling(false);
