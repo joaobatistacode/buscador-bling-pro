@@ -4,6 +4,14 @@ import { mensagemErro } from '@/lib/errors';
 
 type ObjetoJson = Record<string, unknown>;
 
+const STATUS_TRANSITORIOS_BLING = new Set([408, 425, 429, 500, 502, 503, 504]);
+const TENTATIVAS_LEITURA = 3;
+const TENTATIVAS_ESCRITA = 2;
+const TIMEOUT_LEITURA_MS = 12_000;
+const TIMEOUT_ESCRITA_MS = 20_000;
+
+export const maxDuration = 60;
+
 const comoObjeto = (valor: unknown): ObjetoJson =>
   valor && typeof valor === 'object' && !Array.isArray(valor)
     ? valor as ObjetoJson
@@ -120,19 +128,61 @@ function centimetrosNaUnidade(cm: number, unidade: number): number {
   return cm;
 }
 
-async function chamarBling(caminho: string, token: string, init?: RequestInit) {
-  const res = await fetch(`${BLING_API}${caminho}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
-  });
+const pausa = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  const corpo = await res.json().catch(() => null);
-  return { ok: res.ok, status: res.status, corpo };
+function esperaDoBling(retryAfter: string | null, tentativa: number) {
+  const segundos = Number(retryAfter);
+  if (retryAfter !== null && Number.isFinite(segundos) && segundos >= 0) {
+    return Math.min(5_000, Math.max(500, segundos * 1_000));
+  }
+
+  const data = retryAfter ? Date.parse(retryAfter) : Number.NaN;
+  if (Number.isFinite(data)) {
+    return Math.min(5_000, Math.max(500, data - Date.now()));
+  }
+
+  return Math.min(3_000, 650 * (2 ** tentativa));
+}
+
+async function chamarBling(caminho: string, token: string, init: RequestInit = {}) {
+  const metodo = String(init.method || 'GET').toUpperCase();
+  const somenteLeitura = metodo === 'GET' || metodo === 'HEAD';
+  const maximoTentativas = somenteLeitura ? TENTATIVAS_LEITURA : TENTATIVAS_ESCRITA;
+  const timeoutMs = somenteLeitura ? TIMEOUT_LEITURA_MS : TIMEOUT_ESCRITA_MS;
+
+  for (let tentativa = 0; tentativa < maximoTentativas; tentativa++) {
+    try {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+      const res = await fetch(`${BLING_API}${caminho}`, {
+        ...init,
+        signal,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          ...(init.headers || {}),
+        },
+      });
+
+      const corpo = await res.json().catch(() => null);
+      if (res.ok || !STATUS_TRANSITORIOS_BLING.has(res.status) || tentativa + 1 >= maximoTentativas) {
+        return { ok: res.ok, status: res.status, corpo };
+      }
+
+      await pausa(esperaDoBling(res.headers.get('retry-after'), tentativa));
+    } catch (erro: unknown) {
+      if (tentativa + 1 >= maximoTentativas) {
+        const motivo = erro instanceof Error && erro.name === 'TimeoutError'
+          ? 'Tempo limite ao comunicar com o Bling.'
+          : `Falha temporária ao comunicar com o Bling: ${mensagemErro(erro)}`;
+        return { ok: false, status: 504, corpo: { error: { description: motivo } } };
+      }
+      await pausa(esperaDoBling(null, tentativa));
+    }
+  }
+
+  return { ok: false, status: 504, corpo: { error: { description: 'O Bling não respondeu após novas tentativas.' } } };
 }
 
 function descreveErro(corpo: unknown, status: number): string {
